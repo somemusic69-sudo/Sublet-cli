@@ -28,7 +28,7 @@ async function withServer(handler: (req: import('node:http').IncomingMessage, re
 }
 
 test('a resumable download appends only the missing range and verifies SHA', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   const ranges: string[] = [];
   const { server, url } = await withServer((req, res) => {
     const range = req.headers.range;
@@ -69,7 +69,7 @@ test('a resumable download appends only the missing range and verifies SHA', asy
     assert.deepEqual(await readFile(dest), MODEL);
     assert.equal(ranges[0], `bytes=${already}-`);
     assert.ok(progress.some((n) => n >= MODEL.length));
-    const sidecar = JSON.parse(await readFile(`${dest}.kiln.json`, 'utf8')) as { sha256: string; size: number };
+    const sidecar = JSON.parse(await readFile(`${dest}.sublet.json`, 'utf8')) as { sha256: string; size: number };
     assert.equal(sidecar.sha256, SHA);
     assert.equal(sidecar.size, MODEL.length);
     await assert.rejects(stat(`${part}.json`), /ENOENT/);
@@ -80,7 +80,7 @@ test('a resumable download appends only the missing range and verifies SHA', asy
 });
 
 test('a server that ignores Range restarts the file instead of corrupting it', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   const ranges: string[] = [];
   const { server, url } = await withServer((req, res) => {
     ranges.push(req.headers.range || 'none');
@@ -103,7 +103,7 @@ test('a server that ignores Range restarts the file instead of corrupting it', a
 });
 
 test('a partial started for another URL is discarded instead of resumed', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   const ranges: string[] = [];
   const { server, url } = await withServer((req, res) => {
     const range = req.headers.range;
@@ -122,7 +122,7 @@ test('a partial started for another URL is discarded instead of resumed', async 
     for (const source of [JSON.stringify({ url: 'https://huggingface.co/other/repo/resolve/main/model.gguf' }), null]) {
       ranges.length = 0;
       await rm(dest, { force: true });
-      await rm(`${dest}.kiln.json`, { force: true });
+      await rm(`${dest}.sublet.json`, { force: true });
       await writeFile(`${dest}.part`, other);
       if (source) await writeFile(`${dest}.part.json`, source);
       else await rm(`${dest}.part.json`, { force: true });
@@ -138,7 +138,7 @@ test('a partial started for another URL is discarded instead of resumed', async 
 });
 
 test('a bad hash is rejected and both files are removed', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   const { server, url } = await withServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': MODEL.length });
     res.end(MODEL);
@@ -158,7 +158,7 @@ test('a bad hash is rejected and both files are removed', async () => {
 });
 
 test('a layer mismatch is rejected after the hash passes', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   const { server, url } = await withServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': MODEL.length });
     res.end(MODEL);
@@ -175,7 +175,7 @@ test('a layer mismatch is rejected after the hash passes', async () => {
 });
 
 test('cached files are reused without another request', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   let requests = 0;
   const { server, url } = await withServer((_req, res) => {
     requests++;

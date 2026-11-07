@@ -157,7 +157,7 @@ async function main(): Promise<number> {
   }
 }
 
-const invoked = process.argv[1] && (process.argv[1].endsWith('index.js') || process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('kiln-agent') || process.argv[1].endsWith('kiln'));
+const invoked = process.argv[1] && (process.argv[1].endsWith('index.js') || process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('sublet-cli') || process.argv[1].endsWith('sublet'));
 if (invoked) {
   main().then((code) => {
     process.exitCode = code;

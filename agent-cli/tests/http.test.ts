@@ -26,10 +26,10 @@ test('an HTTP 426 from the server becomes an update instruction', async () => {
   try {
     await assert.rejects(fetchJson(`${url}/api/agent/me`), (error: Error) => {
       assert.match(error.message, /needs v2\.0\.0/);
-      assert.match(error.message, /npx kiln-agent@latest/);
+      assert.match(error.message, /npx sublet-cli@latest/);
       return true;
     });
-    assert.equal(userAgent, `kiln-agent/${VERSION}`);
+    assert.equal(userAgent, `sublet-cli/${VERSION}`);
   } finally {
     await close();
   }

@@ -79,7 +79,7 @@ test('llama flags lock GPU layers, context, slots, and logging', () => {
 });
 
 test('the runner becomes ready and reports llm props', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const port = await findFreePort();
   const runner = new LlamaRunner({
     binaryPath: process.execPath,
@@ -106,7 +106,7 @@ test('the runner becomes ready and reports llm props', async () => {
 });
 
 test('a locked context below the requested size is refused', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const runner = new LlamaRunner({
     binaryPath: process.execPath,
     baseArgs: [FIXTURE],
@@ -128,7 +128,7 @@ test('a locked context below the requested size is refused', async () => {
 });
 
 test('a crashed llama-server is restarted in place', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const port = await findFreePort();
   const runner = new LlamaRunner({
     binaryPath: process.execPath,
@@ -160,7 +160,7 @@ test('a crashed llama-server is restarted in place', async () => {
 });
 
 test('stopping during a restart leaves no llama-server running', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const { runner, spawns } = await flakyRunner(dir, 'hang', { maxRestarts: 5, windowMs: 60_000, delayMs: 100 });
   try {
     await runner.start();
@@ -180,7 +180,7 @@ test('stopping during a restart leaves no llama-server running', async () => {
 });
 
 test('restarts that never become ready end in a fatal state, one spawn per failure', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const { runner, spawns } = await flakyRunner(dir, 'exit', { maxRestarts: 2, windowMs: 1, delayMs: 50 });
   try {
     await runner.start();
@@ -200,7 +200,7 @@ test('restarts that never become ready end in a fatal state, one spawn per failu
 });
 
 test('a failed first start is reported to the caller and not retried in the background', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-runner-'));
   const { runner, spawns } = await flakyRunner(dir, 'dead', { maxRestarts: 5, windowMs: 60_000, delayMs: 50 });
   try {
     await assert.rejects(runner.start(), /exited during startup/);

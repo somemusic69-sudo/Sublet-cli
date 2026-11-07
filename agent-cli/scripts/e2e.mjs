@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end proof for the terminal agent against a running Kiln server.
+ * End-to-end proof for the terminal agent against a running Sublet server.
  *
  * It uses simulation mode so no GPU or multi-GB GGUF is required. The tunnel,
  * canary, billing, streaming, booking timer, reconnect grace, and CLI commands
@@ -13,10 +13,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const SERVER = (process.env.KILN_E2E_SERVER || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const SERVER = (process.env.SUBLET_E2E_SERVER || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const CLI = join(process.cwd(), 'dist', 'index.js');
-const HOME = await mkdtemp(join(tmpdir(), 'kiln-e2e-'));
-let buyerKey = process.env.KILN_E2E_BUYER_KEY || '';
+const HOME = await mkdtemp(join(tmpdir(), 'sublet-e2e-'));
+let buyerKey = process.env.SUBLET_E2E_BUYER_KEY || '';
 const results = [];
 
 function log(name, detail) {
@@ -47,7 +47,7 @@ async function login(who) {
   const response = await fetch(`${SERVER}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: who, password: 'kiln-demo' }),
+    body: JSON.stringify({ email: who, password: 'sublet-demo' }),
   });
   const text = await response.text();
   assert(response.ok, `login ${who} failed: ${response.status} ${text}`);
@@ -61,7 +61,7 @@ async function signup(username) {
   const response = await fetch(`${SERVER}/api/auth/signup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username, email: `${username}@kiln-e2e.test`, password: 'kiln-demo' }),
+    body: JSON.stringify({ username, email: `${username}@sublet-e2e.test`, password: 'sublet-demo' }),
   });
   const text = await response.text();
   assert(response.ok, `signup ${username} failed: ${response.status} ${text}`);
@@ -85,7 +85,7 @@ async function createRequest(cookie, tag) {
   const result = await api('/api/board', {
     method: 'POST',
     body: JSON.stringify({
-      hfUrl: `https://huggingface.co/kiln-e2e/${tag}-0.5b-gguf/resolve/main/${tag}-0.5b-q4_k_m.gguf`,
+      hfUrl: `https://huggingface.co/sublet-e2e/${tag}-0.5b-gguf/resolve/main/${tag}-0.5b-q4_k_m.gguf`,
       hours: 0.5,
       pricePerHourUsd: 0.2,
       minContext: 2048,
@@ -132,7 +132,7 @@ async function startJobs(token, requestId) {
 
 function spawnCli(args) {
   const child = spawn(process.execPath, [CLI, ...args], {
-    env: { ...process.env, KILN_HOME: HOME },
+    env: { ...process.env, SUBLET_HOME: HOME },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -177,11 +177,11 @@ try {
   const tokenResponse = await api('/api/host/token', { method: 'POST', body: '{}' }, host.cookie);
   assert(tokenResponse.ok, `host token failed: ${tokenResponse.status}`);
   const token = tokenResponse.body.token;
-  assert(token?.startsWith('kh_'), 'host token format is wrong');
+  assert(token?.startsWith('sh_'), 'host token format is wrong');
   log('host key', `issued for @${host.user.username} (${token.slice(0, 10)}...)`);
 
   const loginProc = spawn(process.execPath, [CLI, 'login', '--key', token, '--server', SERVER, '--json'], {
-    env: { ...process.env, KILN_HOME: HOME },
+    env: { ...process.env, SUBLET_HOME: HOME },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let loginOutput = '';
@@ -189,7 +189,7 @@ try {
   loginProc.stderr.on('data', (chunk) => { loginOutput += chunk.toString(); });
   const loginCode = await new Promise((resolve) => loginProc.once('exit', resolve));
   assert(loginCode === 0 && loginOutput.includes('"ok":true'), `login failed: ${loginOutput}`);
-  log('login', 'host key saved to the isolated Kiln home');
+  log('login', 'host key saved to the isolated Sublet home');
 
   agent = await startAgent(token);
   const me = await waitFor(async () => {
@@ -203,7 +203,7 @@ try {
   assert(publicChat.chunks.length > 3, 'expected streamed token chunks');
   assert(publicChat.text.includes('data: [DONE]'), 'missing [DONE]');
   assert(publicChat.final?.usage?.completion_tokens > 0, 'missing usage in final chunk');
-  assert(publicChat.final?.kiln?.charged === true, 'public chat was not billed');
+  assert(publicChat.final?.sublet?.charged === true, 'public chat was not billed');
   log('pay-per-token', `${publicChat.final.usage.completion_tokens} tokens billed through the tunnel`);
 
   const request = await createRequest(ava.cookie, `e2e${Date.now()}`);
@@ -223,7 +223,7 @@ try {
   log('canary + timer', `request ${request.id} timer started after verification`);
 
   const bookedChat = await sseChat(`/r/${request.id}/v1/chat/completions`, 24);
-  assert(bookedChat.final?.kiln?.charged === false, 'booked tokens were charged');
+  assert(bookedChat.final?.sublet?.charged === false, 'booked tokens were charged');
   assert(bookedChat.chunks.length > 2, 'booked chat did not stream');
   log('unlimited booking', `${bookedChat.final.usage.completion_tokens} tokens during the paid window, charged $0`);
 
@@ -233,7 +233,7 @@ try {
   log('jobs board', `${board.body.requests.length} open request(s), active booking excluded`);
 
   // Crash the process (no graceful stop) and prove the persisted booking is
-  // restored from ~/.kiln/state.json, not just kept alive in memory.
+  // restored from ~/.sublet/state.json, not just kept alive in memory.
   await waitFor(async () => {
     try {
       const raw = await readFile(join(HOME, 'state.json'), 'utf8');
@@ -261,7 +261,7 @@ try {
     return result.ok && result.body.host?.status === 'online' && result.body.activeRequest?.timerStartedAt === startedAt ? result.body : null;
   }, 20_000, 'the crashed agent to restore the booking');
   const restoredChat = await sseChat(`/r/${request.id}/v1/chat/completions`, 16);
-  assert(restoredChat.final?.kiln?.charged === false, 'restored booking charged tokens');
+  assert(restoredChat.final?.sublet?.charged === false, 'restored booking charged tokens');
   log('60s grace + overnight recovery', `process restart reattached ${restored.activeRequest.id} with the same timer`);
 
   const cancel = await api(`/api/board/${request.id}/cancel`, { method: 'POST', body: '{}' }, ava.cookie);
@@ -281,12 +281,12 @@ try {
       return result.ok && result.body.host?.status === 'online' && result.body.activeRequest?.id === jobsRequest.id && result.body.activeRequest.timerStartedAt
         ? result.body.activeRequest
         : null;
-    }, 25_000, 'kiln jobs to claim and start serving');
+    }, 25_000, 'sublet jobs to claim and start serving');
     const jobsChat = await sseChat(`/r/${jobsRequest.id}/v1/chat/completions`, 16);
-    assert(jobsChat.final?.kiln?.charged === false, 'standalone jobs chat was charged');
+    assert(jobsChat.final?.sublet?.charged === false, 'standalone jobs chat was charged');
     log('standalone jobs', `claimed ${jobsActive.id} and served it in one process`);
     await api(`/api/board/${jobsRequest.id}/cancel`, { method: 'POST', body: '{}' }, ava.cookie);
-    await waitFor(async () => jobsAgent.child.exitCode != null, 20_000, 'kiln jobs to exit after cancellation');
+    await waitFor(async () => jobsAgent.child.exitCode != null, 20_000, 'sublet jobs to exit after cancellation');
   } finally {
     if (jobsAgent.child.exitCode == null) await stopAgent(jobsAgent);
   }

@@ -9,28 +9,28 @@ export type AgentConfig = {
   tokenLabel?: string;
 };
 
-export function kilnHome(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.KILN_HOME && env.KILN_HOME.trim() ? env.KILN_HOME : join(homedir(), '.kiln'));
+export function subletHome(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env.SUBLET_HOME && env.SUBLET_HOME.trim() ? env.SUBLET_HOME : join(homedir(), '.sublet'));
 }
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'config.json');
+  return join(subletHome(env), 'config.json');
 }
 
 export function binDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'bin');
+  return join(subletHome(env), 'bin');
 }
 
 export function modelsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'models');
+  return join(subletHome(env), 'models');
 }
 
 export function logsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'logs');
+  return join(subletHome(env), 'logs');
 }
 
 export function cacheDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'cache');
+  return join(subletHome(env), 'cache');
 }
 
 export function normalizeServer(raw: string): string {
@@ -72,7 +72,7 @@ export function maskToken(token: string | null | undefined): string {
 }
 
 export function hostKeyFromToken(token: string): boolean {
-  return /^(kh_|sk-)[A-Za-z0-9_-]{6,}$/.test(token.trim());
+  return /^(sh_|sk-)[A-Za-z0-9_-]{6,}$/.test(token.trim());
 }
 
 export function displayNameForHome(home: string): string {

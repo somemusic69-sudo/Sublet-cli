@@ -78,7 +78,7 @@ export function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
-/** Latest kiln-agent on the npm registry, or null when it cannot be checked. */
+/** Latest sublet-cli on the npm registry, or null when it cannot be checked. */
 export async function latestPublishedVersion(timeoutMs = 5_000): Promise<string | null> {
   const registry = (process.env.npm_config_registry || 'https://registry.npmjs.org/').replace(/\/+$/, '');
   try {

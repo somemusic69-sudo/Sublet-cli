@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-process.env.KILN_HOME = await mkdtemp(join(tmpdir(), 'kiln-agent-test-'));
+process.env.SUBLET_HOME = await mkdtemp(join(tmpdir(), 'sublet-cli-test-'));
 const { Agent } = await import('../src/agent.js');
 const { Logger } = await import('../src/logger.js');
 
@@ -49,7 +49,7 @@ async function fakeServer(options: { meDelayMs?: number; onSocket?: (socket: Web
 
 function agentFor(server: string, simulation: boolean) {
   return new Agent({
-    config: { server, token: 'kh_test', wsPath: '/tunnel', updatedAt: 0 },
+    config: { server, token: 'sh_test', wsPath: '/tunnel', updatedAt: 0 },
     logger: new Logger({ level: 'silent' }),
     simulation,
     tokPerSec: 500,

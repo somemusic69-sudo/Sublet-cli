@@ -39,7 +39,7 @@ test('release assets follow the GPU and operating system', () => {
 });
 
 test('an archive is downloaded, checksum-verified, extracted, and recorded', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+  const home = await mkdtemp(join(tmpdir(), 'sublet-bin-'));
   const zip = new AdmZip();
   zip.addFile('bin/llama-server.exe', Buffer.from('fake llama binary'));
   const archive = join(home, 'fixture.zip');
@@ -53,7 +53,7 @@ test('an archive is downloaded, checksum-verified, extracted, and recorded', asy
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
-  const env = { ...process.env, KILN_HOME: home, KILN_LLAMA_SHA256: sha };
+  const env = { ...process.env, SUBLET_HOME: home, SUBLET_LLAMA_SHA256: sha };
   try {
     const install = await installLlamaServer({
       platform: 'win32',
@@ -87,7 +87,7 @@ test('an archive is downloaded, checksum-verified, extracted, and recorded', asy
 });
 
 test('a bad binary checksum is rejected before extraction', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+  const home = await mkdtemp(join(tmpdir(), 'sublet-bin-'));
   const zip = new AdmZip();
   zip.addFile('llama-server.exe', Buffer.from('fake'));
   const archive = join(home, 'fixture.zip');
@@ -100,7 +100,7 @@ test('a bad binary checksum is rejected before extraction', async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
-  const env = { ...process.env, KILN_HOME: home, KILN_LLAMA_SHA256: '0'.repeat(64) };
+  const env = { ...process.env, SUBLET_HOME: home, SUBLET_LLAMA_SHA256: '0'.repeat(64) };
   try {
     await assert.rejects(installLlamaServer({
       platform: 'win32',
@@ -145,10 +145,10 @@ function zipWith(name: string, content: string): Buffer {
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 test('a modified or unhashed installed binary is reinstalled instead of reused', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+  const home = await mkdtemp(join(tmpdir(), 'sublet-bin-'));
   const bytes = zipWith('bin/llama-server', 'genuine llama binary');
   const { server, base, requests } = await serveFiles({ '/llama.zip': bytes });
-  const env = { ...process.env, KILN_HOME: home };
+  const env = { ...process.env, SUBLET_HOME: home };
   const options = {
     platform: 'linux' as const,
     arch: 'x64',
@@ -179,12 +179,12 @@ test('a modified or unhashed installed binary is reinstalled instead of reused',
   }
 });
 
-test('KILN_LLAMA_SHA256 pins only the main archive, not the CUDA runtime companion', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+test('SUBLET_LLAMA_SHA256 pins only the main archive, not the CUDA runtime companion', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-bin-'));
   const main = zipWith('llama-server.exe', 'cuda llama');
   const cudart = zipWith('cudart64_12.dll', 'cuda runtime');
   const { server, base } = await serveFiles({ '/main.zip': main, '/cudart.zip': cudart });
-  const env = { ...process.env, KILN_HOME: home, KILN_LLAMA_SHA256: sha256(main) };
+  const env = { ...process.env, SUBLET_HOME: home, SUBLET_LLAMA_SHA256: sha256(main) };
   try {
     const install = await installLlamaServer({
       platform: 'win32',

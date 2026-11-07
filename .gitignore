@@ -9,4 +9,4 @@ Thumbs.db
 # Agent runtime data
 agent-cli/data/
 agent-cli/*.tgz
-.kiln/
+.sublet/

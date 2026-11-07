@@ -1,6 +1,6 @@
-# Kiln Agent CLI
+# Sublet CLI
 
-A standalone terminal agent for the Kiln peer-to-peer GPU market. It runs on the
+A standalone terminal agent for the Sublet peer-to-peer GPU market. It runs on the
 GPU owner's machine, manages `llama-server` and GGUF files, keeps the machine
 awake during overnight bookings, and holds one outbound WebSocket to the central
 server. Buyers never connect to the host directly.
@@ -13,7 +13,7 @@ host machines without redeploying the marketplace.
 Browser / buyer
       │  OpenAI-compatible stream
       ▼
-Kiln central server  ◄──── outbound WSS tunnel ────  kiln-agent (this package)
+Sublet central server  ◄──── outbound WSS tunnel ────  sublet-cli (this package)
       │                                                   │
       │                                                   ├── llama-server on 127.0.0.1
       │                                                   ├── GGUF cache + SHA-256
@@ -26,19 +26,19 @@ Postgres/SQLite ledger, wallet, reliability, request board
 
 ```bash
 # On the GPU machine
-npx kiln-agent login --key kh_... --server https://kiln.run
-npx kiln-agent doctor --fix
-npx kiln-agent start
+npx sublet-cli login --key sh_... --server https://sublet.example.com
+npx sublet-cli doctor --fix
+npx sublet-cli start
 ```
 
-The host key is issued by the Kiln website. `login` verifies it before saving.
+The host key is issued by the Sublet website. `login` verifies it before saving.
 `doctor --fix` scans the GPU and downloads the matching prebuilt `llama-server`
 (CUDA for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback).
 
 For public pay-per-token hosting from the terminal:
 
 ```bash
-npx kiln-agent host \
+npx sublet-cli host \
   https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
   --price 0.25 --ctx 8192 --slots 4
 ```
@@ -46,7 +46,7 @@ npx kiln-agent host \
 For an SSH/mini-datacenter host that wants to see the buyer request board:
 
 ```bash
-npx kiln-agent jobs
+npx sublet-cli jobs
 ```
 
 `jobs` claims the selected request and, if no agent is already running, starts
@@ -57,13 +57,13 @@ ends or you press Ctrl+C.
 
 | Command | Purpose |
 | --- | --- |
-| `kiln login` | Prompt for a host key (or use `--key`), verify it, save it with mode 0600. |
-| `kiln doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
-| `kiln start` | Main mode: connect, wait for a web claim, download/verify the model, pass the canary, serve. |
-| `kiln host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
-| `kiln jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
-| `kiln status` | Read-only host, reliability, wallet and active-booking summary. |
-| `kiln logout` | Remove the saved host key. |
+| `sublet login` | Prompt for a host key (or use `--key`), verify it, save it with mode 0600. |
+| `sublet doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
+| `sublet start` | Main mode: connect, wait for a web claim, download/verify the model, pass the canary, serve. |
+| `sublet host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
+| `sublet jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
+| `sublet status` | Read-only host, reliability, wallet and active-booking summary. |
+| `sublet logout` | Remove the saved host key. |
 
 Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 `--vram`, `--ctx`, `--slots`, `--price`, `--price-in`, `--price-out`,
@@ -74,7 +74,7 @@ Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 Everything can be exercised without a GPU or a multi-GB download:
 
 ```bash
-kiln start --simulation --gpu "NVIDIA GeForce RTX 4060" --vram 8188 --tok-s 24
+sublet start --simulation --gpu "NVIDIA GeForce RTX 4060" --vram 8188 --tok-s 24
 ```
 
 Simulation mode still uses the real tunnel, metering, billing, canary, booking
@@ -89,7 +89,7 @@ agent-cli/
 │   ├── index.ts                 CLI entry, parser, exit codes, shebang
 │   ├── commands.ts              login / doctor / start / host / jobs / status
 │   ├── agent.ts                 orchestration of tunnel, engine and dashboard
-│   ├── config.ts                ~/.kiln, URL normalization, key masking
+│   ├── config.ts                ~/.sublet, URL normalization, key masking
 │   ├── logger.ts                human and JSON logs (stderr, never dashboard stdout)
 │   ├── hardware/
 │   │   ├── gpuMonitor.ts        nvidia-smi / rocm-smi / macOS / Windows fallback
@@ -107,7 +107,7 @@ agent-cli/
 │       ├── terminalDashboard.ts the overnight status box
 │       └── progress.ts          download bar with speed and ETA
 ├── tests/                       unit tests, no network or GPU required
-├── scripts/e2e.mjs              9-check end-to-end proof against a live Kiln server
+├── scripts/e2e.mjs              9-check end-to-end proof against a live Sublet server
 └── README.md
 ```
 
@@ -115,9 +115,9 @@ agent-cli/
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Kiln GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
+│  Sublet GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Host Endpoint : https://alex.kiln.run/api/v1                        │
+│  Host Endpoint : https://alex.sublet.example.com/api/v1                        │
 │  Reliability   : 98.5%  (safe - auto-ban < 90.0%)                    │
 │  GPU Detected  : NVIDIA GeForce RTX 3090 (21.2 GB free / 24.0 GB)    │
 │  GPU Temp/Power: 61°C · 185W · Wake-Lock: ACTIVE - sleep blocked     │
@@ -129,7 +129,7 @@ agent-cli/
 ├──────────────────────────────────────────────────────────────────────┤
 │  Session Earn. : $4.68 / $6.00 Guaranteed                            │
 │  Total Wallet  : $42.15                                              │
-│  Server        : https://kiln.run                                    │
+│  Server        : https://sublet.example.com                                    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -139,15 +139,15 @@ systemd/journald.
 
 ## Data directory
 
-Everything lives under `~/.kiln` (override with `KILN_HOME`):
+Everything lives under `~/.sublet` (override with `SUBLET_HOME`):
 
 ```text
-~/.kiln/config.json        host key + server (0600)
-~/.kiln/state.json         active booking recovery snapshot (0600)
-~/.kiln/bin/               llama-server builds + manifest.json
-~/.kiln/models/            verified .gguf files + .kiln.json sidecars
-~/.kiln/cache/             GitHub release metadata, temporary archives
-~/.kiln/logs/              llama-server log (prompt logging disabled)
+~/.sublet/config.json        host key + server (0600)
+~/.sublet/state.json         active booking recovery snapshot (0600)
+~/.sublet/bin/               llama-server builds + manifest.json
+~/.sublet/models/            verified .gguf files + .sublet.json sidecars
+~/.sublet/cache/             GitHub release metadata, temporary archives
+~/.sublet/logs/              llama-server log (prompt logging disabled)
 ```
 
 Model files are never re-downloaded when the sidecar hash and file size still
@@ -182,7 +182,7 @@ from zero rather than corrupting weights.
    connection after a router reset) is torn down and reconnected. The agent
    keeps `llama-server` and the loaded model in VRAM. The server preserves
    claims and the booking clock for 60 seconds. If the agent process itself is
-   killed, `~/.kiln/state.json` lets the next `start` reload the cached model
+   killed, `~/.sublet/state.json` lets the next `start` reload the cached model
    and reattach to the same booking instead of starting over. `SIGTERM`
    (shutdown, `systemctl stop`) keeps that file; Ctrl+C clears it.
 10. **Host key transport.** The tunnel authenticates with an
@@ -197,8 +197,8 @@ from zero rather than corrupting weights.
 
 ## Server contract
 
-This CLI works with the Kiln server in `../sellingai` and with any server that
-implements the same small contract:
+This CLI works with the Sublet server (separate, not public yet) and with any
+server that implements the same small contract:
 
 | Endpoint / frame | Purpose |
 | --- | --- |
@@ -208,10 +208,10 @@ implements the same small contract:
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
 | `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `chunk`, `done`, `error` | agent → server |
-| HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx kiln-agent@latest` |
+| HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublet-cli@latest` |
 | `welcome`, `canary`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent |
 
-The agent sends its version as `user-agent: kiln-agent/<version>` on every
+The agent sends its version as `user-agent: sublet-cli/<version>` on every
 request and as `agentVersion` in `hello`, so the server can refuse old agents
 before a protocol change. A handshake refused with HTTP `401`/`403` is treated
 like a rejected host key.
@@ -230,8 +230,8 @@ npm test
 npm run build
 node dist/index.js --help
 
-# end-to-end against a running Kiln server
-$env:KILN_HOME="$env:TEMP\kiln-agent-e2e"
+# end-to-end against a running Sublet server
+$env:SUBLET_HOME="$env:TEMP\sublet-cli-e2e"
 npm run e2e
 ```
 
@@ -249,11 +249,11 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-The package exposes both `kiln` and `kiln-agent` binaries. Users can then run:
+The package exposes both `sublet` and `sublet-cli` binaries. Users can then run:
 
 ```bash
-npx kiln-agent doctor --fix
-npx kiln-agent start
+npx sublet-cli doctor --fix
+npx sublet-cli start
 ```
 
 ## Verification status
@@ -261,13 +261,13 @@ npx kiln-agent start
 This build was verified on a Windows machine with an RTX 4060:
 
 - `npm run typecheck`, `npm test` (40 tests), and `npm run build` pass.
-- `npm run e2e` passes ten checks against a live Kiln server: tunnel, billed
+- `npm run e2e` passes ten checks against a live Sublet server: tunnel, billed
   public stream, canary, booking timer, unlimited booked stream, jobs board,
   process-kill crash recovery with the same timer, standalone `jobs` serving,
   and escrow cleanup.
-- `kiln doctor --fix` downloaded the official CUDA `llama-server` build
+- `sublet doctor --fix` downloaded the official CUDA `llama-server` build
   (b12176), verified its published SHA-256, extracted it, and recorded the
-  binary hash in `~/.kiln/bin/manifest.json`.
+  binary hash in `~/.sublet/bin/manifest.json`.
 - A real 637MB TinyLlama 1.1B Q4_K_M GGUF was downloaded, header-checked,
   loaded into `llama-server`, verified with the HF SHA-256, and served a real
   40-token chat through the central tunnel with billing. The same real booking
