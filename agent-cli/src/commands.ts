@@ -4,7 +4,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Agent } from './agent.js';
 import { apiUrl, configPath, kilnHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
-import { BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION } from './version.js';
+import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION, compareVersions } from './version.js';
 import type { Logger } from './logger.js';
 import { GpuMonitor, checkFit } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
@@ -12,9 +12,9 @@ import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
 import { ensureLlamaServer, findExistingLlama, variantFor } from './engine/binaryManager.js';
 import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
-import { fetchJson, HttpError } from './util/http.js';
+import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
 import { execFile, sleep, toError } from './util/exec.js';
-import { formatBytes, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
+import { formatBytes, formatBytesPerSec, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
 import type { AgentMe, AgentRequest } from './types.js';
 
 export type GlobalFlags = {
@@ -112,6 +112,11 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
 
 type Check = { name: string; status: 'ok' | 'warn' | 'fail'; detail: string };
 
+// A public single-file GGUF on HuggingFace, the same CDN that serves booking models.
+const SPEED_TEST_URL = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+// Below 2 MB/s an 8 GB model takes more than an hour to download.
+const SLOW_DOWNLOAD_BYTES_PER_SEC = 2 * 1024 * 1024;
+
 function check(name: string, status: Check['status'], detail: string): Check {
   return { name, status, detail };
 }
@@ -123,6 +128,11 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   checks.push(check('Node.js', nodeMajor >= 20 ? 'ok' : 'fail', `v${process.versions.node} (need >= 20)`));
   checks.push(check('Platform', 'ok', `${process.platform}/${process.arch}`));
+  const latest = await latestPublishedVersion();
+  const outdated = latest != null && compareVersions(latest, VERSION) > 0;
+  checks.push(check('Agent version', outdated ? 'warn' : 'ok', outdated
+    ? `v${VERSION} installed, v${latest} available. Update with: npx ${AGENT_NAME}@latest`
+    : `v${VERSION}${latest ? ' (latest)' : ''}`));
 
   let me: AgentMe | null = null;
   if (cfg.token) {
@@ -142,6 +152,15 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
     checks.push(check('Server', 'ok', `${health.brand || BRAND} at ${server} · ${Date.now() - started}ms`));
   } catch (error) {
     checks.push(check('Server', 'fail', error instanceof Error ? error.message : String(error)));
+  }
+
+  try {
+    const speed = await measureDownloadSpeed(SPEED_TEST_URL);
+    const eightGbSeconds = (8 * 1024 ** 3) / Math.max(1, speed.bytesPerSec);
+    checks.push(check('Download speed', speed.bytesPerSec >= SLOW_DOWNLOAD_BYTES_PER_SEC ? 'ok' : 'warn',
+      `${formatBytesPerSec(speed.bytesPerSec)} from HuggingFace · an 8 GB model takes about ${formatDuration(eightGbSeconds)}`));
+  } catch (error) {
+    checks.push(check('Download speed', 'warn', toError(error).message));
   }
 
   const monitor = new GpuMonitor();
@@ -224,8 +243,7 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
     json: flags.json,
     once: flags.once,
   });
-  await runAgent(agent, logger);
-  return 0;
+  return await runAgent(agent, logger);
 }
 
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
@@ -272,32 +290,32 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
     json: flags.json,
     once: flags.once,
   });
-  await runAgent(agent, logger);
-  return 0;
+  return await runAgent(agent, logger);
 }
 
-async function runAgent(agent: Agent, logger: Logger): Promise<void> {
+async function runAgent(agent: Agent, logger: Logger): Promise<number> {
   let stopping = false;
-  const stop = async (code = 0) => {
+  let exitCode = 0;
+  const stop = async (code: number, preserveState = false) => {
     if (stopping) return;
     stopping = true;
-    await agent.stop();
-    process.exitCode = code;
+    exitCode = code;
+    await agent.stop(preserveState);
   };
-  const onSignal = () => { void stop(130); };
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
-  agent.once('fatal', (error: Error) => {
-    logger.error(error.message);
-    void stop(1);
-  });
+  const onInterrupt = () => { void stop(130); };
+  // Shutdowns and service managers send SIGTERM; keep state.json so the next start can reattach to the booking.
+  const onTerminate = () => { void stop(143, true); };
+  process.once('SIGINT', onInterrupt);
+  process.once('SIGTERM', onTerminate);
+  agent.once('fatal', () => { void stop(1, true); });
   try {
     await agent.run();
   } finally {
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onTerminate);
     await agent.stop();
   }
+  return exitCode;
 }
 
 export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<number> {
@@ -555,7 +573,7 @@ export function globalHelp(): string {
     '  kiln doctor --fix',
     '  kiln start',
     '  kiln start --simulation --gpu "RTX 4060" --vram 8188',
-    '  kiln host https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf --price 0.25',
+    '  kiln host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
     '  kiln jobs',
   ].join('\n');
 }

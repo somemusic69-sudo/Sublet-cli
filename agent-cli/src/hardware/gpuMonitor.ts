@@ -24,7 +24,8 @@ export function parseNvidiaCsv(text: string): GpuStats[] {
     if (cols.length < 3) continue;
     const name = cols[0] || 'NVIDIA GPU';
     const total = clampMb(num(cols[1]));
-    const free = clampMb(num(cols[2]));
+    const freeRaw = num(cols[2]);
+    const free = freeRaw == null ? total : clampMb(freeRaw);
     const used = Math.max(0, total - free);
     const utilization = num(cols[3]);
     const temp = num(cols[4]);
@@ -35,7 +36,7 @@ export function parseNvidiaCsv(text: string): GpuStats[] {
       name,
       vendor: 'nvidia',
       totalVramMb: total,
-      freeVramMb: free || (total || 0),
+      freeVramMb: free,
       usedVramMb: used,
       utilizationPct: utilization,
       temperatureC: temp,
@@ -74,7 +75,8 @@ export function parseRocmJson(raw: unknown): GpuStats[] {
     }, {});
     const name = entries['card series'] || entries['card model'] || entries['product name'] || entries['card sku'] || 'AMD GPU';
     const total = clampMb(num(entries['vram total memory (b)']) ? Number(entries['vram total memory (b)']) / 1024 / 1024 : num(entries['vram total size']));
-    const used = clampMb(num(entries['vram used memory (b)']) ? Number(entries['vram used memory (b)']) / 1024 / 1024 : num(entries['vram used size']));
+    const usedBytes = entries['vram total used memory (b)'] ?? entries['vram used memory (b)'];
+    const used = clampMb(num(usedBytes) ? Number(usedBytes) / 1024 / 1024 : num(entries['vram used size']));
     gpus.push({
       index,
       name,
@@ -169,7 +171,7 @@ export function checkFit(needsMb: number, gpu: GpuStats | null, safetyRatio = 0.
   if (!gpu) {
     return { ok: false, reason: 'No GPU detected', freeMb: 0, needsMb, headroomMb: -needsMb };
   }
-  const budget = gpu.freeVramMb > 0 ? gpu.freeVramMb : gpu.totalVramMb;
+  const budget = gpu.freeVramMb;
   const overhead = Math.max(256, Math.round(needsMb * safetyRatio));
   const required = needsMb + overhead;
   return {

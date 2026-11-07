@@ -13,6 +13,7 @@ import {
   type GgufInfo,
 } from './gguf.js';
 import { modelsDir } from '../config.js';
+import { USER_AGENT } from '../version.js';
 
 export type ModelProgress = {
   phase: 'download' | 'verify' | 'header' | 'cache';
@@ -52,6 +53,7 @@ export type DownloadModelOptions = {
   fetchImpl?: typeof fetch;
   showProgress?: boolean;
   stream?: NodeJS.WriteStream;
+  slots?: number;
 };
 
 type Sidecar = {
@@ -80,6 +82,19 @@ export function modelPathFor(url: string, cacheDir = modelsDir()): string {
 
 function sidecarPath(path: string): string {
   return `${path}.kiln.json`;
+}
+
+function partSourcePath(part: string): string {
+  return `${part}.json`;
+}
+
+async function readPartSource(part: string): Promise<string | null> {
+  try {
+    const data = JSON.parse(await readFile(partSourcePath(part), 'utf8')) as { url?: unknown };
+    return typeof data?.url === 'string' ? data.url : null;
+  } catch {
+    return null;
+  }
 }
 
 function emitProgress(options: DownloadModelOptions, progress: ModelProgress, bar: ProgressBar | null): void {
@@ -116,7 +131,7 @@ async function writeSidecar(path: string, sha256: string, info: GgufInfo, size: 
   await writeFile(sidecarPath(path), JSON.stringify(data), 'utf8');
 }
 
-function loadedFrom(path: string, url: string, sha: string, size: number, info: GgufInfo, verified: boolean, context: number): LoadedModel {
+function loadedFrom(path: string, url: string, sha: string, size: number, info: GgufInfo, verified: boolean, context: number, slots = 1): LoadedModel {
   const paramB = info.paramB;
   const quant = info.quantLabel;
   return {
@@ -131,19 +146,19 @@ function loadedFrom(path: string, url: string, sha: string, size: number, info: 
     layers: info.layers,
     contextTrain: info.contextTrain,
     architecture: info.architecture,
-    needsMb: paramB ? estimateVramMb({ paramB, quant: quant || 'Q4_K_M', context, layers: info.layers ?? undefined }) : null,
+    needsMb: paramB ? estimateVramMb({ paramB, quant: quant || 'Q4_K_M', context, layers: info.layers ?? undefined, slots }) : null,
     verified,
   };
 }
 
-async function verifyHeader(path: string, expectedLayers: number | null | undefined, expectedSha: string, url: string, context: number): Promise<LoadedModel> {
+async function verifyHeader(path: string, expectedLayers: number | null | undefined, expectedSha: string, url: string, context: number, slots = 1): Promise<LoadedModel> {
   const info = await readGgufHeader(path);
   if (expectedLayers && info.layers && Math.abs(info.layers - expectedLayers) > 2) {
     throw new Error(`GGUF header has ${info.layers} layers, buyer asked for ${expectedLayers}`);
   }
   const size = await fileSize(path);
   await writeSidecar(path, expectedSha, info, size);
-  return loadedFrom(path, url, expectedSha, size, info, true, context);
+  return loadedFrom(path, url, expectedSha, size, info, true, context, slots);
 }
 
 export async function downloadModel(options: DownloadModelOptions): Promise<LoadedModel> {
@@ -159,6 +174,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   const dest = modelPathFor(options.url, cacheDir);
   const part = `${dest}.part`;
   const context = options.context ?? 8192;
+  const slots = options.slots ?? 1;
   const fetchImpl = options.fetchImpl ?? fetch;
 
   if (await fileExists(dest)) {
@@ -170,7 +186,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       try {
         const info = await readGgufHeader(dest);
         const verified = Boolean(options.expectedSha256);
-        return loadedFrom(dest, options.url, cached?.sha256 || '', size, info, verified, context);
+        return loadedFrom(dest, options.url, cached?.sha256 || '', size, info, verified, context, slots);
       } catch {
         await removeIfExists(dest);
       }
@@ -187,7 +203,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
           throw new Error(`GGUF has ${info.layers} layers, expected ${options.expectedLayers}`);
         }
         await writeSidecar(dest, actual, info, size);
-        return loadedFrom(dest, options.url, actual, size, info, Boolean(options.expectedSha256), context);
+        return loadedFrom(dest, options.url, actual, size, info, Boolean(options.expectedSha256), context, slots);
       } catch {
         await removeIfExists(dest);
       }
@@ -195,9 +211,13 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   }
 
   let startAt = (await fileExists(part)) ? await fileSize(part) : 0;
+  if (startAt > 0 && await readPartSource(part) !== options.url) {
+    await removeIfExists(part);
+    startAt = 0;
+  }
   let total = options.expectedSize ?? null;
   let response: Response;
-  const headers: Record<string, string> = { 'user-agent': 'kiln-agent/1.0', accept: 'application/octet-stream' };
+  const headers: Record<string, string> = { 'user-agent': USER_AGENT, accept: 'application/octet-stream' };
   if (startAt > 0) headers.range = `bytes=${startAt}-`;
 
   try {
@@ -211,7 +231,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       // A stale partial should never wedge the download. Retry from zero once.
       await removeIfExists(part);
       startAt = 0;
-      response = await fetchImpl(options.url, { headers: { 'user-agent': 'kiln-agent/1.0' }, redirect: 'follow', signal: options.signal });
+      response = await fetchImpl(options.url, { headers: { 'user-agent': USER_AGENT }, redirect: 'follow', signal: options.signal });
     } else {
       throw new Error(`Download failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -220,7 +240,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   if (response.status === 416) {
     await removeIfExists(part);
     startAt = 0;
-    response = await fetchImpl(options.url, { headers: { 'user-agent': 'kiln-agent/1.0' }, redirect: 'follow', signal: options.signal });
+    response = await fetchImpl(options.url, { headers: { 'user-agent': USER_AGENT }, redirect: 'follow', signal: options.signal });
   }
   if (!response.ok || !response.body) {
     throw new Error(`Download failed with HTTP ${response.status}`);
@@ -264,6 +284,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     stream: options.stream ?? process.stderr,
   });
 
+  await writeFile(partSourcePath(part), JSON.stringify({ url: options.url }), 'utf8');
   const writer = createWriteStream(part, { flags: append ? 'a' : 'w' });
   let received = startAt;
   const started = Date.now();
@@ -311,10 +332,12 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   const actual = hash.digest('hex');
   if (options.expectedSha256 && actual.toLowerCase() !== options.expectedSha256.toLowerCase()) {
     await removeIfExists(part);
+    await removeIfExists(partSourcePath(part));
     await removeIfExists(dest);
     throw new Error(`SHA-256 mismatch. Expected ${options.expectedSha256}, got ${actual}. The file was rejected.`);
   }
   await rename(part, dest);
+  await removeIfExists(partSourcePath(part));
   emitProgress(options, {
     phase: 'verify',
     received,
@@ -324,7 +347,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     etaSeconds: 0,
     note: 'Verifying GGUF header',
   }, null);
-  const model = await verifyHeader(dest, options.expectedLayers, actual, options.url, context);
+  const model = await verifyHeader(dest, options.expectedLayers, actual, options.url, context, slots);
   emitProgress(options, {
     phase: 'header',
     received,
@@ -337,7 +360,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   return model;
 }
 
-export async function verifyModelFile(path: string, expected?: { sha256?: string | null; layers?: number | null; context?: number }): Promise<LoadedModel> {
+export async function verifyModelFile(path: string, expected?: { sha256?: string | null; layers?: number | null; context?: number; slots?: number }): Promise<LoadedModel> {
   const size = await fileSize(path);
   const hash = await sha256File(path);
   if (expected?.sha256 && hash.toLowerCase() !== expected.sha256.toLowerCase()) {
@@ -347,7 +370,7 @@ export async function verifyModelFile(path: string, expected?: { sha256?: string
   if (expected?.layers && info.layers && Math.abs(info.layers - expected.layers) > 2) {
     throw new Error(`GGUF has ${info.layers} layers, expected ${expected.layers}`);
   }
-  return loadedFrom(path, path, hash, size, info, Boolean(expected?.sha256), expected?.context ?? 8192);
+  return loadedFrom(path, path, hash, size, info, Boolean(expected?.sha256), expected?.context ?? 8192, expected?.slots ?? 1);
 }
 
 export function cachedModelName(url: string): string {

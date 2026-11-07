@@ -64,6 +64,11 @@ test('only GGUF model files are accepted', () => {
   assert.equal(rejectModelFile('model.gguf'), null);
 });
 
+test('split GGUF shards are refused before download', () => {
+  assert.match(rejectModelFile('qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf') || '', /Split GGUF/);
+  assert.equal(rejectModelFile('Qwen2.5-7B-Instruct-Q4_K_M.gguf'), null);
+});
+
 test('HuggingFace resolve, blob, and hf.co links are parsed', () => {
   const resolve = parseHfUrl('https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf');
   assert.equal(resolve?.repo, 'Qwen/Qwen2.5-7B-Instruct-GGUF');
@@ -81,4 +86,25 @@ test('VRAM estimate grows with context and quantization', () => {
   assert.ok(q8 > q4);
   assert.ok(long > q4);
   assert.ok(q4 > 4000);
+});
+
+test('general.file_type uses the llama.cpp llama_ftype ids', () => {
+  const quantFor = (fileType: number) => parseGgufHeader(buildGgufSample([
+    { key: 'general.architecture', type: 8, write: (b) => b.str('llama') },
+    { key: 'general.file_type', type: 4, write: (b) => b.u32(fileType) },
+  ])).quantLabel;
+  assert.equal(quantFor(7), 'Q8_0');
+  assert.equal(quantFor(8), 'Q5_0');
+  assert.equal(quantFor(9), 'Q5_1');
+  assert.equal(quantFor(15), 'Q4_K_M');
+  assert.equal(quantFor(30), 'IQ4_XS');
+  assert.equal(quantFor(32), 'BF16');
+  assert.equal(quantFor(6), null);
+});
+
+test('VRAM estimate reserves KV cache for every parallel slot', () => {
+  const one = estimateVramMb({ paramB: 8, quant: 'Q4_K_M', context: 8192, layers: 32 });
+  const four = estimateVramMb({ paramB: 8, quant: 'Q4_K_M', context: 8192, layers: 32, slots: 4 });
+  assert.equal(estimateVramMb({ paramB: 8, quant: 'Q4_K_M', context: 8192, layers: 32, slots: 1 }), one);
+  assert.equal(four - one, 3 * 1024);
 });

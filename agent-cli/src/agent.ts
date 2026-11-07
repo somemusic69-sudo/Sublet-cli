@@ -13,7 +13,7 @@ import { estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFr
 import { LlamaRunner } from './engine/llamaRunner.js';
 import { canarySimulation, runCanary, simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
-import { TerminalDashboard, initialState, type DashboardJob, type DashboardState } from './ui/terminalDashboard.js';
+import { TerminalDashboard, initialState, type DashboardJob, type DashboardState, type DashboardStatus } from './ui/terminalDashboard.js';
 import type { AgentMe, ChatMessage, HeartbeatPayload, HelloPayload, LoadJob, ServerMessage } from './types.js';
 import { fetchJson, HttpError } from './util/http.js';
 import { execFile, sleep } from './util/exec.js';
@@ -111,6 +111,7 @@ export class Agent extends EventEmitter {
   private gpuTimer: NodeJS.Timeout | null = null;
   private activeJobs = new Map<string, ActiveJob>();
   private stopped = false;
+  private readonly startup = new AbortController();
   private bookingWake = false;
   private loadingModel = false;
   private meInitialWallet: number | null = null;
@@ -135,6 +136,7 @@ export class Agent extends EventEmitter {
     this.gpu = simulatedGpu(options.gpuOverride ?? null);
     const state = initialState(options.config.server);
     this.dashboard = new TerminalDashboard(state, {
+      enabled: !options.json,
       color: Boolean(process.stdout.isTTY),
       unicode: process.platform === 'win32' ? true : true,
     });
@@ -277,7 +279,7 @@ export class Agent extends EventEmitter {
         architecture: this.model.architecture,
         ...(overrides.model || {}),
       },
-      context: overrides.context ?? this.options.context ?? 8192,
+      context: overrides.context ?? this.runnerContext ?? this.persisted?.booking.context ?? this.options.context ?? 8192,
       slots: overrides.slots ?? 1,
       timerStartedAt: overrides.timerStartedAt ?? current?.timerStartedAt ?? null,
       timerEndsAt: overrides.timerEndsAt ?? current?.timerEndsAt ?? null,
@@ -316,9 +318,14 @@ export class Agent extends EventEmitter {
     }
     this.updateGpuDashboard();
     const restored = await this.restorePersistedBooking();
-    if (!restored && this.options.model) {
-      await this.prepareStartupModel(this.options.model);
+    if (!restored && this.options.model && !this.stopped) {
+      try {
+        await this.prepareStartupModel(this.options.model);
+      } catch (error) {
+        if (!this.stopped) throw error;
+      }
     }
+    if (this.stopped) return this.releaseResources();
     this.dashboard.start();
     this.setupKeyboard();
     this.dashboard.update({ status: 'starting', server: cfg.server });
@@ -342,18 +349,21 @@ export class Agent extends EventEmitter {
         this.dashboard.update({ status: 'auth-failed', message: 'Host key rejected. Run kiln login again.' });
       }
     });
+    this.tunnel.on('outdated', (error: Error) => { this.fail(error, 'outdated'); });
     this.tunnel.on('message', (message: ServerMessage) => { void this.handleMessage(message); });
     this.tunnel.on('auth-failed', (error: Error) => { this.fail(error); });
     this.tunnel.start();
     try {
       await this.tunnel.waitForWelcome(20_000);
     } catch (error) {
+      if (this.stopped) return this.releaseResources();
       this.dashboard.update({ status: 'offline', message: error instanceof Error ? error.message : String(error) });
       await this.stop(true);
       throw error;
     }
     this.dashboard.update({ status: 'online', endpoint, message: null });
     await this.refreshMe();
+    if (this.stopped) return this.releaseResources();
     this.markOnline();
     setTimeout(() => { void this.refreshMe(); }, 1_200);
     this.meTimer = setInterval(() => { void this.refreshMe(); }, 10_000);
@@ -364,6 +374,7 @@ export class Agent extends EventEmitter {
       await this.stop();
       return;
     }
+    if (this.stopped) return;
     await new Promise<void>((resolve) => {
       this.once('stop', resolve);
     });
@@ -420,7 +431,7 @@ export class Agent extends EventEmitter {
         contextTrain: opts.context,
         sha256: opts.expectedSha ?? null,
         verified: Boolean(opts.expectedSha),
-        needsMb: estimateVramMb({ paramB, quant, context: opts.context, layers: opts.expectedLayers ?? undefined }),
+        needsMb: estimateVramMb({ paramB, quant, context: opts.context, layers: opts.expectedLayers ?? undefined, slots: this.runnerSlots() }),
         size: 0,
         architecture: 'simulation',
       };
@@ -432,6 +443,7 @@ export class Agent extends EventEmitter {
         expectedSha256: opts.expectedSha ?? null,
         expectedLayers: opts.expectedLayers ?? null,
         context: opts.context,
+        slots: this.runnerSlots(),
         onProgress: (progress) => {
           if (opts.requestId) {
             this.tunnel?.send({ type: 'progress', requestId: opts.requestId, note: progress.note });
@@ -439,15 +451,17 @@ export class Agent extends EventEmitter {
           this.dashboard.update({ message: progress.note });
         },
         showProgress: true,
+        signal: this.startup.signal,
       });
     } else {
-      loaded = await verifyModelFile(input, { sha256: opts.expectedSha ?? null, layers: opts.expectedLayers ?? null, context: opts.context });
+      loaded = await verifyModelFile(input, { sha256: opts.expectedSha ?? null, layers: opts.expectedLayers ?? null, context: opts.context, slots: this.runnerSlots() });
     }
     const needsMb = loaded.needsMb ?? estimateVramMb({
       paramB: loaded.paramB || 7,
       quant: loaded.quant || 'Q4_K_M',
       context: opts.context,
       layers: loaded.layers ?? undefined,
+      slots: this.runnerSlots(),
     });
     const fit = checkFit(needsMb, this.gpu.primary);
     if (this.gpu.primary && !fit.ok) throw new Error(fit.reason || 'Model does not fit in free VRAM');
@@ -551,7 +565,7 @@ export class Agent extends EventEmitter {
       quant: model?.quant || 'Q4_K_M',
       paramB: model?.paramB ?? null,
       layers: model?.layers ?? null,
-      context: this.options.context ?? 8192,
+      context: this.runnerContext ?? this.persisted?.booking.context ?? this.options.context ?? 8192,
       slots: this.runnerSlots(),
       sha256: model?.sha256 || null,
       hashVerified: Boolean(model?.verified),
@@ -741,9 +755,16 @@ export class Agent extends EventEmitter {
         : { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 },
       message: null,
     });
+    const onChunk = (text: string) => {
+      if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
+      active.text += text;
+      active.chunks++;
+      // A chunk lost to a tunnel drop would leave a hole in the buyer's text, so stop the job instead.
+      if (!this.tunnel?.send({ type: 'chunk', jobId, text })) controller.abort(new Error('Tunnel dropped during the stream'));
+    };
     try {
       let result;
-      if (this.options.simulation || !this.runner) {
+      if (this.options.simulation) {
         result = await simulateChat({
           jobId,
           messages: message.messages as ChatMessage[],
@@ -753,14 +774,10 @@ export class Agent extends EventEmitter {
         }, {
           signal: controller.signal,
           tokPerSec: this.options.tokPerSec || 24,
-          onChunk: (text) => {
-            if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
-            active.text += text;
-            active.chunks++;
-            this.tunnel?.send({ type: 'chunk', jobId, text });
-          },
+          onChunk,
         });
       } else {
+        if (!this.runner) throw new Error('No model is loaded on this host');
         result = await streamChat(this.runner.url, {
           jobId,
           messages: message.messages as ChatMessage[],
@@ -769,12 +786,7 @@ export class Agent extends EventEmitter {
           model: this.model?.modelId || 'local',
         }, {
           signal: controller.signal,
-          onChunk: (text) => {
-            if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
-            active.text += text;
-            active.chunks++;
-            this.tunnel?.send({ type: 'chunk', jobId, text });
-          },
+          onChunk,
         });
       }
       const elapsed = Math.max(1, Date.now() - active.startedAt);
@@ -881,6 +893,7 @@ export class Agent extends EventEmitter {
         token: this.options.config.token,
         timeoutMs: 10_000,
       });
+      if (this.stopped) return;
       this.me = me;
       if (this.meInitialWallet == null) this.meInitialWallet = me.wallet.availableNanos;
       const host = me.host;
@@ -1072,9 +1085,9 @@ export class Agent extends EventEmitter {
     });
   }
 
-  private fail(error: Error): void {
+  private fail(error: Error, status: DashboardStatus = 'auth-failed'): void {
     this.logger.error(error.message);
-    this.dashboard.update({ status: 'auth-failed', message: error.message });
+    this.dashboard.update({ status, message: error.message });
     this.emit('fatal', error);
   }
 
@@ -1100,6 +1113,19 @@ export class Agent extends EventEmitter {
     if (!preserveState) this.clearPersistedBooking();
     for (const job of this.activeJobs.values()) job.controller.abort(new Error('Agent stopping'));
     this.activeJobs.clear();
+    this.startup.abort(new Error('Agent stopping'));
+    await this.releaseResources();
+    this.emit('stop');
+  }
+
+  /** Frees the wake lock, tunnel, llama-server and terminal. run() calls it again when startup finishes after stop(). */
+  private async releaseResources(): Promise<void> {
+    for (const timer of [this.meTimer, this.gpuTimer, this.bookingTimer]) if (timer) clearInterval(timer);
+    if (this.endTimer) clearTimeout(this.endTimer);
+    this.meTimer = null;
+    this.gpuTimer = null;
+    this.bookingTimer = null;
+    this.endTimer = null;
     this.cleanupKeyboard();
     await this.sleepGuard.stop();
     await this.tunnel?.stop();
@@ -1108,6 +1134,5 @@ export class Agent extends EventEmitter {
     this.runnerModelPath = null;
     this.runnerContext = null;
     this.dashboard.stop();
-    this.emit('stop');
   }
 }

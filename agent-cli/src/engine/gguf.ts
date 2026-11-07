@@ -1,4 +1,5 @@
 import { readFirstBytes } from '../util/fs.js';
+import { USER_AGENT } from '../version.js';
 
 export type GgufInfo = {
   version: number;
@@ -19,9 +20,11 @@ export type GgufInfo = {
 };
 
 const FILE_TYPE_QUANT: Record<number, string> = {
-  0: 'F32', 1: 'F16', 2: 'Q4_0', 3: 'Q4_1', 6: 'Q5_0', 7: 'Q5_1', 8: 'Q8_0',
+  0: 'F32', 1: 'F16', 2: 'Q4_0', 3: 'Q4_1', 7: 'Q8_0', 8: 'Q5_0', 9: 'Q5_1',
   10: 'Q2_K', 11: 'Q3_K_S', 12: 'Q3_K_M', 13: 'Q3_K_L', 14: 'Q4_K_S', 15: 'Q4_K_M',
-  16: 'Q5_K_S', 17: 'Q5_K_M', 18: 'Q6_K',
+  16: 'Q5_K_S', 17: 'Q5_K_M', 18: 'Q6_K', 19: 'IQ2_XXS', 20: 'IQ2_XS', 21: 'Q2_K_S',
+  22: 'IQ3_XS', 23: 'IQ3_XXS', 24: 'IQ1_S', 25: 'IQ4_NL', 26: 'IQ3_S', 27: 'IQ3_M',
+  28: 'IQ2_S', 29: 'IQ2_M', 30: 'IQ4_XS', 31: 'IQ1_M', 32: 'BF16',
 };
 
 export function quantBytesPerParam(quant: string): number {
@@ -46,10 +49,11 @@ export function guessLayers(paramB: number): number {
   return 96;
 }
 
-export function estimateVramMb(opts: { paramB: number; quant: string; context: number; layers?: number }): number {
+export function estimateVramMb(opts: { paramB: number; quant: string; context: number; layers?: number; slots?: number }): number {
   const modelMb = opts.paramB * quantBytesPerParam(opts.quant) * 1024;
   const layers = opts.layers || guessLayers(opts.paramB);
-  const kvMb = (opts.context * layers * 4096) / (1024 * 1024);
+  const slots = Math.max(1, Math.round(opts.slots ?? 1));
+  const kvMb = (opts.context * slots * layers * 4096) / (1024 * 1024);
   return Math.round(modelMb + kvMb + 700);
 }
 
@@ -75,6 +79,9 @@ export function layerMismatch(claimedParamB: number | null, layers: number | nul
 
 export function rejectModelFile(file: string): string | null {
   const lower = file.toLowerCase();
+  if (/-\d{5}-of-\d{5}\.gguf$/.test(lower)) {
+    return 'Split GGUF files (-00001-of-0000N.gguf) are not supported yet. Pick a single-file GGUF.';
+  }
   if (lower.endsWith('.gguf')) return null;
   if (/\.(bin|pkl|pickle|pt|pth|safetensors|onnx|ggml|ckpt)$/.test(lower)) {
     return 'Kiln only runs GGUF weights. Pickle and PyTorch files can execute code on a host PC, so they are refused.';
@@ -239,7 +246,7 @@ export type HfFileInfo = { sha256: string | null; size: number | null; siblings:
 
 export async function fetchHfFileInfo(repo: string, file: string, timeoutMs = 15_000): Promise<HfFileInfo> {
   const response = await fetch(`https://huggingface.co/api/models/${repo}?blobs=true`, {
-    headers: { 'user-agent': 'kiln-agent/1.0' },
+    headers: { 'user-agent': USER_AGENT },
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`HuggingFace API returned ${response.status}`);
@@ -301,7 +308,7 @@ export async function inspectHuggingFace(rawUrl: string, timeoutMs = 15_000): Pr
   }
   try {
     const response = await fetch(parsed.downloadUrl, {
-      headers: { range: 'bytes=0-4194303', 'user-agent': 'kiln-agent/1.0' },
+      headers: { range: 'bytes=0-4194303', 'user-agent': USER_AGENT },
       signal,
       redirect: 'follow',
     });

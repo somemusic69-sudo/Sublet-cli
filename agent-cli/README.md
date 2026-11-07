@@ -39,7 +39,7 @@ For public pay-per-token hosting from the terminal:
 
 ```bash
 npx kiln-agent host \
-  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf \
+  https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
   --price 0.25 --ctx 8192 --slots 4
 ```
 
@@ -58,7 +58,7 @@ ends or you press Ctrl+C.
 | Command | Purpose |
 | --- | --- |
 | `kiln login` | Prompt for a host key (or use `--key`), verify it, save it with mode 0600. |
-| `kiln doctor` | Node, server, key, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
+| `kiln doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
 | `kiln start` | Main mode: connect, wait for a web claim, download/verify the model, pass the canary, serve. |
 | `kiln host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
 | `kiln jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
@@ -101,14 +101,13 @@ agent-cli/
 │   │   ├── llamaRunner.ts       hidden 127.0.0.1 port, locked flags, crash restart
 │   │   └── gguf.ts              header parser + VRAM estimator
 │   ├── network/
-│   │   ├── tunnelClient.ts      WSS, 1/2/5/10/15/30s backoff, heartbeat, auth fail
+│   │   ├── tunnelClient.ts      WSS, 1/2/5/10/15/30s backoff, heartbeat, dead-link detection, auth fail, version gate
 │   │   └── streamProxy.ts       SSE parser, stream=true piping, canary logprobs
 │   └── ui/
 │       ├── terminalDashboard.ts the overnight status box
 │       └── progress.ts          download bar with speed and ETA
-├── tests/                       36 unit tests, no network or GPU required
+├── tests/                       unit tests, no network or GPU required
 ├── scripts/e2e.mjs              9-check end-to-end proof against a live Kiln server
-├── CLI_PLAN.md                  the build plan (also at repository root)
 └── README.md
 ```
 
@@ -179,10 +178,13 @@ from zero rather than corrupting weights.
    to five times in two minutes. A crash loop becomes a fatal state instead of
    spinning forever.
 9. **Reconnect grace + crash recovery.** A 10-second Wi-Fi blip reconnects with
-   backoff. The agent keeps `llama-server` and the loaded model in VRAM. The
-   server preserves claims and the booking clock for 60 seconds. If the agent
-   process itself is killed, `~/.kiln/state.json` lets the next `start` reload
-   the cached model and reattach to the same booking instead of starting over.
+   backoff. A tunnel that stops answering pings for 45 seconds (a half-open TCP
+   connection after a router reset) is torn down and reconnected. The agent
+   keeps `llama-server` and the loaded model in VRAM. The server preserves
+   claims and the booking clock for 60 seconds. If the agent process itself is
+   killed, `~/.kiln/state.json` lets the next `start` reload the cached model
+   and reattach to the same booking instead of starting over. `SIGTERM`
+   (shutdown, `systemctl stop`) keeps that file; Ctrl+C clears it.
 10. **Host key transport.** The tunnel authenticates with an
     `Authorization: Bearer` header so the key is not placed in the WebSocket
     URL or proxy access logs. If an older server rejects header auth, the CLI
@@ -206,7 +208,13 @@ implements the same small contract:
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
 | `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `chunk`, `done`, `error` | agent → server |
+| HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx kiln-agent@latest` |
 | `welcome`, `canary`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent |
+
+The agent sends its version as `user-agent: kiln-agent/<version>` on every
+request and as `agentVersion` in `hello`, so the server can refuse old agents
+before a protocol change. A handshake refused with HTTP `401`/`403` is treated
+like a rejected host key.
 
 `loaded` is followed by the server's canary. The server starts the booking
 timer only after a passing canary; the CLI displays the timer it receives in

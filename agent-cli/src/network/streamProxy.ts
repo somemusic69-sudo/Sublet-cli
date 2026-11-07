@@ -86,6 +86,7 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
   const timeout = setTimeout(() => controller.abort(new Error('Generation timed out')), options.timeoutMs ?? 10 * 60_000);
   const onAbort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', onAbort);
+  if (options.signal?.aborted) onAbort();
   const started = Date.now();
   let firstTokenAt: number | null = null;
   let text = '';
@@ -96,6 +97,7 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
   let chunkCount = 0;
 
   try {
+    controller.signal.throwIfAborted();
     const response = await fetchImpl(`${llamaUrl.replace(/\/+$/, '')}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'text/event-stream' },

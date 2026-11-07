@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
-import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama } from '../src/engine/binaryManager.js';
+import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary } from '../src/engine/binaryManager.js';
 
 function release(name: string, url: string, size: number) {
   return {
@@ -111,6 +111,98 @@ test('a bad binary checksum is rejected before extraction', async () => {
       showProgress: false,
     }), /Checksum mismatch/);
     await assert.rejects(stat(join(home, 'bin', 'manifest.json')), /ENOENT/);
+  } finally {
+    server.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+async function serveFiles(files: Record<string, Buffer>) {
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    const body = files[req.url || ''];
+    if (!body) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/zip', 'content-length': body.length });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  return { server, base: `http://127.0.0.1:${port}`, requests: () => requests };
+}
+
+function zipWith(name: string, content: string): Buffer {
+  const zip = new AdmZip();
+  zip.addFile(name, Buffer.from(content));
+  return zip.toBuffer();
+}
+
+const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+test('a modified or unhashed installed binary is reinstalled instead of reused', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+  const bytes = zipWith('bin/llama-server', 'genuine llama binary');
+  const { server, base, requests } = await serveFiles({ '/llama.zip': bytes });
+  const env = { ...process.env, KILN_HOME: home };
+  const options = {
+    platform: 'linux' as const,
+    arch: 'x64',
+    env,
+    release: { tag_name: 'b9999', assets: [{ name: 'llama-b9999-bin-ubuntu-x64.zip', browser_download_url: `${base}/llama.zip`, digest: `sha256:${sha256(bytes)}` }] },
+    showProgress: false,
+  };
+  try {
+    const first = await installLlamaServer(options);
+    await writeFile(first.path, 'tampered');
+    assert.notEqual((await findExistingLlama({ env }))?.path, first.path);
+    const second = await installLlamaServer(options);
+    assert.equal(requests(), 2);
+    assert.equal(second.path, first.path);
+    assert.equal(await readFile(second.path, 'utf8'), 'genuine llama binary');
+    assert.equal(await verifyInstalledBinary(second), true);
+
+    const manifestFile = join(home, 'bin', 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
+    for (const install of manifest.installs) delete install.binarySha256;
+    await writeFile(manifestFile, JSON.stringify(manifest));
+    assert.notEqual((await findExistingLlama({ env }))?.path, first.path);
+    await installLlamaServer(options);
+    assert.equal(requests(), 3);
+  } finally {
+    server.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('KILN_LLAMA_SHA256 pins only the main archive, not the CUDA runtime companion', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'kiln-bin-'));
+  const main = zipWith('llama-server.exe', 'cuda llama');
+  const cudart = zipWith('cudart64_12.dll', 'cuda runtime');
+  const { server, base } = await serveFiles({ '/main.zip': main, '/cudart.zip': cudart });
+  const env = { ...process.env, KILN_HOME: home, KILN_LLAMA_SHA256: sha256(main) };
+  try {
+    const install = await installLlamaServer({
+      platform: 'win32',
+      arch: 'x64',
+      env,
+      gpu: { primary: { vendor: 'nvidia' } as never, gpus: [], source: 'test', platform: 'win32', checkedAt: Date.now(), warnings: [] },
+      release: {
+        tag_name: 'b9999',
+        assets: [
+          { name: 'llama-b9999-bin-win-cuda-12.4-x64.zip', browser_download_url: `${base}/main.zip` },
+          { name: 'cudart-llama-bin-win-cuda-12.4-x64.zip', browser_download_url: `${base}/cudart.zip`, digest: `sha256:${sha256(cudart)}` },
+        ],
+      },
+      showProgress: false,
+    });
+    assert.equal(install.verified, true);
+    assert.equal(install.sha256, sha256(main));
+    await stat(join(install.dir || '', 'cudart64_12.dll'));
   } finally {
     server.close();
     await rm(home, { recursive: true, force: true });
