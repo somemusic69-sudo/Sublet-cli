@@ -1,7 +1,7 @@
 import { formatClock, formatDuration, formatPercent, formatSpeed, formatUsdNanos, modelShortName, padRight, stripAnsi, truncate } from '../util/format.js';
 import { BRAND, VERSION } from '../version.js';
 
-export type DashboardStatus = 'starting' | 'online' | 'working' | 'reconnecting' | 'offline' | 'auth-failed' | 'paused';
+export type DashboardStatus = 'starting' | 'online' | 'working' | 'reconnecting' | 'offline' | 'auth-failed' | 'outdated' | 'paused';
 
 export type DashboardJob = {
   kind: 'request' | 'public' | 'canary';
@@ -73,6 +73,7 @@ export function initialState(server: string): DashboardState {
 
 function statusLabel(state: DashboardState): { text: string; status: DashboardStatus } {
   if (state.status === 'auth-failed') return { text: 'AUTH FAILED', status: state.status };
+  if (state.status === 'outdated') return { text: 'UPDATE NEEDED', status: state.status };
   if (state.status === 'reconnecting') return { text: 'RECONNECTING', status: state.status };
   if (state.status === 'paused') return { text: 'HELD', status: state.status };
   if (state.status === 'offline') return { text: 'OFFLINE', status: state.status };
@@ -169,6 +170,7 @@ export function renderFrame(state: DashboardState, options: { width?: number; co
     lines.push(`${v}${padRight(truncate(body, inner), inner)}${v}`);
   };
 
+  lines.push(top);
   add(`${title}`, `STATUS: ${statusText}`);
   lines.push(divider);
   add(`Host Endpoint : ${valueOrDash(state.endpoint)}`);
@@ -209,31 +211,33 @@ export class TerminalDashboard {
   private readonly color: boolean;
   private readonly unicode: boolean;
   private readonly intervalMs: number;
+  private readonly enabled: boolean;
   private timer: NodeJS.Timeout | null = null;
   private started = false;
   private lastFrame = '';
   private lastStatus: DashboardStatus | null = null;
 
-  constructor(state: DashboardState, options: { stream?: NodeJS.WriteStream; color?: boolean; unicode?: boolean; intervalMs?: number } = {}) {
+  constructor(state: DashboardState, options: { stream?: NodeJS.WriteStream; color?: boolean; unicode?: boolean; intervalMs?: number; enabled?: boolean } = {}) {
     this.state = state;
     this.stream = options.stream ?? process.stdout;
     this.color = options.color ?? Boolean(this.stream.isTTY);
     this.unicode = options.unicode ?? true;
     this.intervalMs = options.intervalMs ?? 1_000;
+    this.enabled = options.enabled ?? true;
   }
 
   get current(): DashboardState { return this.state; }
 
   start(): void {
-    if (this.started) return;
+    if (this.started || !this.enabled) return;
     this.started = true;
-    if (this.stream.isTTY) {
-      this.stream.write('\x1b[?25l');
-      this.rerender(true);
-    } else {
-      this.printOnce();
-    }
     this.lastStatus = this.state.status;
+    if (!this.stream.isTTY) {
+      this.printOnce();
+      return;
+    }
+    this.stream.write('\x1b[?25l');
+    this.rerender(true);
     this.timer = setInterval(() => this.rerender(false), this.intervalMs);
   }
 

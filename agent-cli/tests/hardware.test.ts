@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { checkFit, choosePrimary, parseNvidiaCsv, parseNvidiaProcesses, parseWmicJson } from '../src/hardware/gpuMonitor.js';
+import { checkFit, choosePrimary, parseNvidiaCsv, parseNvidiaProcesses, parseRocmJson, parseWmicJson } from '../src/hardware/gpuMonitor.js';
 import { SleepGuard, sleepGuardAvailable, windowsSleepScript } from '../src/hardware/sleepGuard.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -17,6 +17,33 @@ test('nvidia-smi CSV parses multi-GPU output and N/A values', () => {
   assert.equal(gpus[0]?.powerW, null);
   assert.equal(gpus[1]?.temperatureC, null);
   assert.equal(gpus[1]?.powerW, 32.5);
+});
+
+test('a fully used NVIDIA GPU reports 0 MB free and an N/A value falls back to total', () => {
+  const [full, unknown] = parseNvidiaCsv([
+    'NVIDIA GeForce RTX 4090, 24564, 0, 100, 70, 400, 450',
+    'NVIDIA GH200, 97871, [N/A], 0, 40, 90, 900',
+  ].join('\n'));
+  assert.equal(full?.freeVramMb, 0);
+  assert.equal(full?.usedVramMb, 24564);
+  assert.equal(checkFit(20000, full!).ok, false);
+  assert.equal(unknown?.freeVramMb, 97871);
+  assert.equal(unknown?.usedVramMb, 0);
+});
+
+test('rocm-smi JSON subtracts used VRAM under both key spellings', () => {
+  const gib = 1024 ** 3;
+  const [current] = parseRocmJson({
+    card0: { 'Card series': 'Radeon RX 7900 XTX', 'VRAM Total Memory (B)': String(24 * gib), 'VRAM Total Used Memory (B)': String(10 * gib) },
+  });
+  assert.equal(current?.totalVramMb, 24576);
+  assert.equal(current?.usedVramMb, 10240);
+  assert.equal(current?.freeVramMb, 14336);
+  assert.equal(checkFit(20000, current!).ok, false);
+  const [legacy] = parseRocmJson({
+    card0: { 'Card series': 'Radeon RX 6800', 'VRAM Total Memory (B)': String(16 * gib), 'VRAM Used Memory (B)': String(4 * gib) },
+  });
+  assert.equal(legacy?.freeVramMb, 12288);
 });
 
 test('VRAM fit check reserves a small safety margin', () => {
@@ -63,13 +90,28 @@ test('sleep guard uses caffeinate on macOS and releases it', async () => {
     killFn: (async () => { killed = true; }) as never,
   });
   assert.equal(await guard.acquire('booking'), true);
-  assert.deepEqual(calls[0], ['caffeinate', '-dimsu']);
+  assert.deepEqual(calls[0], ['caffeinate', '-dimsu', '-w', String(process.pid)]);
   assert.equal(guard.status().active, true);
   assert.equal(await guard.acquire('again'), true);
   assert.equal(calls.length, 1);
   await guard.stop();
   assert.equal(killed, true);
   assert.equal(guard.status().active, false);
+});
+
+test('sleep guard on Linux holds the inhibitor only while this process lives', async () => {
+  const calls: string[][] = [];
+  const guard = new SleepGuard({
+    platform: 'linux',
+    spawnFn: ((command: string, args: string[]) => { calls.push([command, ...args]); return fakeChild(); }) as never,
+    whichFn: (async () => '/usr/bin/systemd-inhibit') as never,
+    killFn: (async () => undefined) as never,
+  });
+  assert.equal(await guard.acquire('booking'), true);
+  assert.equal(calls[0]?.[0], 'systemd-inhibit');
+  assert.deepEqual(calls[0]?.slice(-4), ['tail', `--pid=${process.pid}`, '-f', '/dev/null']);
+  assert.ok(!calls[0]?.includes('infinity'));
+  await guard.stop();
 });
 
 test('sleep guard uses the Windows execution-state loop', () => {

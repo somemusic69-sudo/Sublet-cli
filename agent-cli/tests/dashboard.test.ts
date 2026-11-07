@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { initialState, renderFrame } from '../src/ui/terminalDashboard.js';
+import { initialState, renderFrame, TerminalDashboard } from '../src/ui/terminalDashboard.js';
+
+function fakeStream(isTTY: boolean): { stream: NodeJS.WriteStream; writes: string[] } {
+  const writes: string[] = [];
+  const stream = { isTTY, write: (chunk: string) => { writes.push(chunk); return true; } } as unknown as NodeJS.WriteStream;
+  return { stream, writes };
+}
 
 test('the dashboard frame shows the fields a host needs overnight', () => {
   const state = initialState('http://127.0.0.1:8787');
@@ -56,4 +62,37 @@ test('standby shows a clear waiting state and no fake GPU', () => {
   assert.match(frame, /Standby - waiting for a web request/);
   assert.match(frame, /No GPU detected/);
   assert.match(frame, /Time Remaining: -/);
+});
+
+test('the frame has a top border and the status color sits on the title line', () => {
+  const state = initialState('http://127.0.0.1:8787');
+  state.status = 'working';
+  const lines = renderFrame(state, { width: 72, color: true }).split('\n');
+  assert.ok(lines[0]?.startsWith('\u250c') && lines[0]?.endsWith('\u2510'), lines[0]);
+  assert.ok(lines[lines.length - 1]?.startsWith('\u2514'));
+  assert.match(lines[1] || '', /STATUS: \x1b\[32m● WORKING\x1b\[0m/);
+});
+
+test('a non-TTY dashboard prints plain frames on status changes only and never redraws in place', async () => {
+  const { stream, writes } = fakeStream(false);
+  const state = initialState('http://127.0.0.1:8787');
+  state.lastHeartbeatAt = Date.now();
+  const dashboard = new TerminalDashboard(state, { stream, intervalMs: 5 });
+  dashboard.start();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  dashboard.update({ message: 'same status' });
+  dashboard.update({ status: 'online' });
+  dashboard.stop();
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every((chunk) => !chunk.includes('\x1b[')), JSON.stringify(writes));
+});
+
+test('a disabled dashboard writes nothing even on a TTY', async () => {
+  const { stream, writes } = fakeStream(true);
+  const dashboard = new TerminalDashboard(initialState('http://127.0.0.1:8787'), { stream, intervalMs: 5, enabled: false });
+  dashboard.start();
+  dashboard.update({ status: 'online', message: 'hello' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  dashboard.stop();
+  assert.deepEqual(writes, []);
 });

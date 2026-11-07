@@ -50,10 +50,13 @@ const VALUE_FLAGS: Record<string, keyof GlobalFlags> = {
 };
 
 const NUMERIC = new Set<keyof GlobalFlags>(['context', 'slots', 'price', 'priceIn', 'priceOut', 'vram', 'tokPerSec', 'timeoutMs']);
+const INTEGER = new Set<keyof GlobalFlags>(['context', 'slots', 'vram']);
 
-function numberFlag(name: string, raw: string): number {
-  const value = Number(raw);
+function numberFlag(name: string, raw: string, integer: boolean): number {
+  const value = raw.trim() ? Number(raw) : Number.NaN;
   if (!Number.isFinite(value)) throw new Error(`${name} expects a number, got "${raw}"`);
+  if (value < 0) throw new Error(`${name} must not be negative, got "${raw}"`);
+  if (integer && !Number.isInteger(value)) throw new Error(`${name} expects a whole number, got "${raw}"`);
   return value;
 }
 
@@ -95,14 +98,15 @@ export function parseArgv(argv: string[]): Parsed {
       }
       const valueKey = VALUE_FLAGS[name];
       if (valueKey) {
-        const value = inline ?? args.shift();
+        const value = inline ?? (args[0]?.startsWith('--') ? undefined : args.shift());
         if (value == null) throw new Error(`${name} needs a value`);
-        if (NUMERIC.has(valueKey)) (flags as unknown as Record<string, unknown>)[valueKey] = numberFlag(name, value);
+        if (NUMERIC.has(valueKey)) (flags as unknown as Record<string, unknown>)[valueKey] = numberFlag(name, value, INTEGER.has(valueKey));
         else (flags as unknown as Record<string, unknown>)[valueKey] = value;
         continue;
       }
       throw new Error(`Unknown option: ${name}`);
     }
+    if (arg.startsWith('-') && arg !== '-') throw new Error(`Unknown option: ${arg}`);
     if (!command) command = arg.toLowerCase();
     else flags.positionals.push(arg);
   }

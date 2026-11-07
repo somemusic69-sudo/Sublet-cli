@@ -1,11 +1,65 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { buildLlamaArgs, findFreePort, LlamaRunner } from '../src/engine/llamaRunner.js';
+import { buildLlamaArgs, findFreePort, LlamaRunner, type LlamaRunnerOptions } from '../src/engine/llamaRunner.js';
 
 const FIXTURE = join(process.cwd(), 'tests', 'fixtures', 'fake-llama-server.mjs');
+
+// First spawn serves /health and exits on /crash. Later spawns hang (never
+// healthy) or exit at once, depending on FLAKY_MODE; 'dead' exits every time.
+const FLAKY_SERVER = `
+import http from 'node:http';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+const log = process.env.FLAKY_LOG;
+const n = existsSync(log) ? readFileSync(log, 'utf8').split('\\n').filter(Boolean).length + 1 : 1;
+appendFileSync(log, process.pid + '\\n');
+const mode = process.env.FLAKY_MODE;
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+if (mode === 'dead' || (n > 1 && mode === 'exit')) process.exit(3);
+else if (n > 1) setInterval(() => {}, 1000);
+else http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(req.url === '/props' ? JSON.stringify({ n_ctx: 8192 }) : '{"status":"ok"}');
+  if (req.url === '/crash') setTimeout(() => process.exit(7), 30);
+}).listen(port, '127.0.0.1');
+`;
+
+async function flakyRunner(dir: string, mode: 'hang' | 'exit' | 'dead', restart: LlamaRunnerOptions['restart']) {
+  const script = join(dir, 'flaky-llama-server.mjs');
+  const log = join(dir, 'spawns.txt');
+  await writeFile(script, FLAKY_SERVER);
+  const runner = new LlamaRunner({
+    binaryPath: process.execPath,
+    baseArgs: [script],
+    modelPath: 'fake.gguf',
+    context: 8192,
+    healthTimeoutMs: 20_000,
+    restart,
+    env: { FLAKY_LOG: log, FLAKY_MODE: mode },
+    logFile: join(dir, 'llama.log'),
+  });
+  const spawns = async () => (await readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(Number);
+  return { runner, spawns };
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function cleanup(runner: LlamaRunner, spawns: () => Promise<number[]>, dir: string): Promise<void> {
+  await runner.stop();
+  for (const pid of await spawns()) if (alive(pid)) process.kill(pid, 'SIGKILL');
+  await rm(dir, { recursive: true, force: true });
+}
 
 test('llama flags lock GPU layers, context, slots, and logging', () => {
   const args = buildLlamaArgs({
@@ -102,5 +156,58 @@ test('a crashed llama-server is restarted in place', async () => {
   } finally {
     await runner.stop();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('stopping during a restart leaves no llama-server running', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const { runner, spawns } = await flakyRunner(dir, 'hang', { maxRestarts: 5, windowMs: 60_000, delayMs: 100 });
+  try {
+    await runner.start();
+    await fetch(`${runner.url}/crash`);
+    const deadline = Date.now() + 10_000;
+    while ((await spawns()).length < 2 && Date.now() < deadline) await delay(50);
+    assert.equal((await spawns()).length, 2);
+    await runner.stop();
+    await delay(1500);
+    const pids = await spawns();
+    assert.equal(pids.length, 2);
+    assert.deepEqual(pids.filter(alive), []);
+    assert.equal(runner.status, 'stopped');
+  } finally {
+    await cleanup(runner, spawns, dir);
+  }
+});
+
+test('restarts that never become ready end in a fatal state, one spawn per failure', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const { runner, spawns } = await flakyRunner(dir, 'exit', { maxRestarts: 2, windowMs: 1, delayMs: 50 });
+  try {
+    await runner.start();
+    const fatal = new Promise<Error>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('runner never gave up')), 15_000);
+      runner.once('fatal', (error: Error) => { clearTimeout(timer); resolve(error); });
+    });
+    await fetch(`${runner.url}/crash`);
+    assert.match((await fatal).message, /did not become ready after 2 restarts/);
+    await delay(1000);
+    assert.equal((await spawns()).length, 3);
+    assert.equal(runner.restarts, 2);
+    assert.equal(runner.status, 'failed');
+  } finally {
+    await cleanup(runner, spawns, dir);
+  }
+});
+
+test('a failed first start is reported to the caller and not retried in the background', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiln-runner-'));
+  const { runner, spawns } = await flakyRunner(dir, 'dead', { maxRestarts: 5, windowMs: 60_000, delayMs: 50 });
+  try {
+    await assert.rejects(runner.start(), /exited during startup/);
+    await delay(1000);
+    assert.equal((await spawns()).length, 1);
+    assert.equal(runner.restarts, 0);
+  } finally {
+    await cleanup(runner, spawns, dir);
   }
 });

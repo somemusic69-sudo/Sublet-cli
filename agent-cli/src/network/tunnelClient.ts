@@ -1,11 +1,11 @@
 import { EventEmitter } from 'node:events';
 import WebSocket, { type RawData } from 'ws';
-import { RECONNECT_DELAYS_MS, HEARTBEAT_MS } from '../version.js';
+import { RECONNECT_DELAYS_MS, HEARTBEAT_MS, UPGRADE_REQUIRED_CLOSE, USER_AGENT, outdatedMessage } from '../version.js';
 import { wsUrl as buildWsUrl } from '../config.js';
 import type { HeartbeatPayload, HelloPayload, ServerMessage } from '../types.js';
 import type { Logger } from '../logger.js';
 
-export type TunnelState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'auth-failed';
+export type TunnelState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'auth-failed' | 'outdated';
 
 export type TunnelOptions = {
   server: string;
@@ -16,6 +16,8 @@ export type TunnelOptions = {
   logger?: Logger;
   reconnectDelaysMs?: number[];
   heartbeatMs?: number;
+  pingIntervalMs?: number;
+  staleAfterMs?: number;
   autoReconnect?: boolean;
   authMode?: 'header' | 'query';
   wsFactory?: (url: string) => WebSocket;
@@ -85,7 +87,7 @@ export class TunnelClient extends EventEmitter {
     this.logger?.debug('Opening tunnel', { url: url.replace(/token=[^&]+/, 'token=***'), auth: this.authMode });
     let socket: WebSocket;
     try {
-      const headers: Record<string, string> = { 'user-agent': 'kiln-agent/1.0' };
+      const headers: Record<string, string> = { 'user-agent': USER_AGENT };
       if (!useQuery) headers.authorization = `Bearer ${this.options.token}`;
       socket = this.options.wsFactory ? this.options.wsFactory(url) : new WebSocket(url, {
         headers,
@@ -98,10 +100,12 @@ export class TunnelClient extends EventEmitter {
     }
     this.socket = socket;
     let opened = false;
+    let handshakeStatus = 0;
 
     socket.on('open', () => {
       opened = true;
       this.attempts = 0;
+      this._lastMessageAt = Date.now();
       this.setState('open');
       this.emit('open');
       this.send(this.options.hello());
@@ -127,12 +131,13 @@ export class TunnelClient extends EventEmitter {
         this.welcomeWaiters = [];
       }
       this.emit('message', message);
-      this.emit(String(message.type), message);
     });
 
     socket.on('pong', () => { this._lastMessageAt = Date.now(); });
 
     socket.on('error', (error: Error) => {
+      const refused = /Unexpected server response: (\d+)/.exec(error.message);
+      if (refused) handshakeStatus = Number(refused[1]);
       this.logger?.debug('Tunnel error', { error: error.message });
     });
 
@@ -144,7 +149,14 @@ export class TunnelClient extends EventEmitter {
         return;
       }
       const text = reason?.toString() || '';
-      const authClose = code === 4001 || code === 4003 || /token|auth/i.test(text);
+      if (code === UPGRADE_REQUIRED_CLOSE || handshakeStatus === 426) {
+        this.setState('outdated');
+        const error = new Error(outdatedMessage(/\d+\.\d+\.\d+/.exec(text)?.[0]));
+        this.rejectWelcomeWaiters(error);
+        this.emit('outdated', error);
+        return;
+      }
+      const authClose = code === 4001 || code === 4003 || handshakeStatus === 401 || handshakeStatus === 403 || /token|auth/i.test(text);
       if (authClose) {
         if (this.authMode === 'header' && !this.triedQueryFallback) {
           this.authMode = 'query';
@@ -155,14 +167,9 @@ export class TunnelClient extends EventEmitter {
           return;
         }
         this.setState('auth-failed');
-        const error = new Error(`Host key was rejected by the server (${code}${text ? `: ${text}` : ''})`);
-        for (const waiter of this.welcomeWaiters) {
-          clearTimeout(waiter.timer);
-          waiter.reject(error);
-        }
-        this.welcomeWaiters = [];
+        const error = new Error(`Host key was rejected by the server (${handshakeStatus ? `HTTP ${handshakeStatus}` : code}${text ? `: ${text}` : ''})`);
+        this.rejectWelcomeWaiters(error);
         this.emit('auth-failed', error);
-        this.logger?.error(error.message);
         return;
       }
       this.logger?.warn('Tunnel closed; reconnecting', { code, reason: text || undefined });
@@ -181,11 +188,15 @@ export class TunnelClient extends EventEmitter {
     }, this.heartbeatMs);
     this.pingTimer = setInterval(() => {
       if (!this.connected || !this.socket) return;
-      try { this.socket.ping(); } catch { /* closing */ }
-      if (this._lastMessageAt && Date.now() - this._lastMessageAt > Math.max(45_000, this.heartbeatMs * 5) && !this.socket) {
-        this.scheduleReconnect();
+      const silentMs = Date.now() - this._lastMessageAt;
+      if (silentMs > (this.options.staleAfterMs ?? Math.max(45_000, this.heartbeatMs * 5))) {
+        // A half-open TCP connection never emits 'close' on its own; terminate it so the close handler reconnects.
+        this.logger?.warn('Tunnel stopped answering pings; reconnecting', { silentMs });
+        this.socket.terminate();
+        return;
       }
-    }, Math.max(10_000, this.heartbeatMs * 2));
+      try { this.socket.ping(); } catch { /* closing */ }
+    }, this.options.pingIntervalMs ?? Math.max(10_000, this.heartbeatMs * 2));
   }
 
   private stopTimers(): void {
@@ -234,9 +245,13 @@ export class TunnelClient extends EventEmitter {
       });
     }
     this.setState('closed');
+    this.rejectWelcomeWaiters(new Error('Tunnel stopped'));
+  }
+
+  private rejectWelcomeWaiters(error: Error): void {
     for (const waiter of this.welcomeWaiters) {
       clearTimeout(waiter.timer);
-      waiter.reject(new Error('Tunnel stopped'));
+      waiter.reject(error);
     }
     this.welcomeWaiters = [];
   }

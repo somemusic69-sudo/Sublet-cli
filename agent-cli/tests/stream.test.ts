@@ -69,3 +69,17 @@ test('canary collects deterministic tokens and logprobs', async () => {
     (server as Server).close();
   }
 });
+
+test('a job cancelled before the stream starts never reaches llama-server', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  controller.abort(new Error('Cancelled by server'));
+  await assert.rejects(
+    streamChat('http://127.0.0.1:1', { jobId: 'j', messages: [], maxTokens: 5, temperature: 0 }, {
+      signal: controller.signal,
+      fetchImpl: (async () => { calls++; throw new Error('unreachable'); }) as typeof fetch,
+    }),
+    /Cancelled by server/,
+  );
+  assert.equal(calls, 0);
+});

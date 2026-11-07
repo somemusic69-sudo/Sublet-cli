@@ -104,7 +104,7 @@ export class SleepGuard {
   }
 
   private startDarwin(reason: string): boolean {
-    const child = this.spawnFn('caffeinate', ['-dimsu'], { stdio: 'ignore' });
+    const child = this.spawnFn('caffeinate', ['-dimsu', '-w', String(process.pid)], { stdio: 'ignore' });
     return this.attach(child, `caffeinate (${reason})`);
   }
 
@@ -113,7 +113,7 @@ export class SleepGuard {
       '--what=sleep:idle',
       '--who=kiln-agent',
       `--why=${reason.slice(0, 80)}`,
-      'sleep', 'infinity',
+      'tail', `--pid=${process.pid}`, '-f', '/dev/null',
     ], { stdio: 'ignore' });
     return this.attach(child, `systemd-inhibit (${reason})`);
   }

@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 import { binDir, cacheDir } from '../config.js';
+import { USER_AGENT } from '../version.js';
 import { pathExists, safeJoin, sha256File } from '../util/fs.js';
 import { fetchJson, type HttpError } from '../util/http.js';
 import { which } from '../util/exec.js';
@@ -142,7 +143,7 @@ async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, 
   const cached = await readReleaseCache(env, cacheKey);
   if (cached && pickReleaseAsset(cached, platform, arch, variant).main) return cached;
   const fetchImpl = options.fetchImpl ?? fetch;
-  const headers = { 'user-agent': 'kiln-agent/1.0', accept: 'application/vnd.github+json' };
+  const headers = { 'user-agent': USER_AGENT, accept: 'application/vnd.github+json' };
   const parse = async (response: Response): Promise<ReleaseInfo | null> => {
     if (!response.ok) return null;
     const data = await response.json() as ReleaseInfo | ReleaseInfo[];
@@ -164,16 +165,16 @@ async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, 
   return release;
 }
 
-async function checksumFor(asset: ReleaseAsset, release: ReleaseInfo, options: InstallOptions): Promise<{ expected: string | null; published: boolean }> {
+async function checksumFor(asset: ReleaseAsset, release: ReleaseInfo, options: InstallOptions, isMain: boolean): Promise<{ expected: string | null; published: boolean }> {
   const env = options.env ?? process.env;
   const override = env.KILN_LLAMA_SHA256;
-  if (override && /^[a-f0-9]{64}$/i.test(override.trim())) return { expected: override.trim().toLowerCase(), published: true };
+  if (isMain && override && /^[a-f0-9]{64}$/i.test(override.trim())) return { expected: override.trim().toLowerCase(), published: true };
   if (asset.digest && /^sha256:[a-f0-9]{64}$/i.test(asset.digest)) return { expected: asset.digest.slice(7).toLowerCase(), published: true };
   const sidecar = release.assets.find((a) => new RegExp(`^${escapeRegExp(asset.name)}\\.sha256(?:\\.txt)?$`, 'i').test(a.name));
   if (sidecar) {
     try {
       const fetchImpl = options.fetchImpl ?? fetch;
-      const response = await fetchImpl(sidecar.browser_download_url, { headers: { 'user-agent': 'kiln-agent/1.0' }, signal: AbortSignal.timeout(20_000) });
+      const response = await fetchImpl(sidecar.browser_download_url, { headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) });
       const text = await response.text();
       const match = text.match(/\b([a-f0-9]{64})\b/i);
       if (match?.[1]) return { expected: match[1].toLowerCase(), published: true };
@@ -200,7 +201,7 @@ async function downloadFile(url: string, dest: string, options: InstallOptions &
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const response = await fetchImpl(url, { redirect: 'follow', headers: { 'user-agent': 'kiln-agent/1.0' }, signal: AbortSignal.timeout(30 * 60_000) });
+      const response = await fetchImpl(url, { redirect: 'follow', headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30 * 60_000) });
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length') || 0) || null;
       if (total) bar?.setTotal(total);
@@ -327,10 +328,7 @@ export async function findExistingLlama(options: InstallOptions = {}): Promise<L
   if (manifest.latest) {
     const install = manifest.installs.find((i) => i.path === manifest.latest);
     if (install && await pathExists(install.path)) {
-      if (install.binarySha256) {
-        const actual = await sha256File(install.path);
-        if (actual !== install.binarySha256) return null;
-      }
+      if (!install.binarySha256 || await sha256File(install.path) !== install.binarySha256) return null;
       return { ...install, source: 'manifest' };
     }
   }
@@ -369,19 +367,15 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
   if (existingBinary) {
     const manifest = await readManifest(env);
     const known = manifest.installs.find((i) => i.path === existingBinary);
-    if (known) {
+    if (known?.binarySha256 && await sha256File(existingBinary) === known.binarySha256) {
       manifest.latest = existingBinary;
       await writeManifest(env, manifest);
       return { ...known, source: 'manifest' };
     }
-    const install: LlamaInstall = { path: existingBinary, version, variant, sha256: null, verified: false, source: 'download', dir: installDir };
-    manifest.installs.push(install);
-    manifest.latest = existingBinary;
-    await writeManifest(env, manifest);
-    return install;
   }
 
   const work = join(cacheDir(env), `install-${Date.now()}`);
+  const staging = `${installDir}.tmp`;
   const archiveDir = join(work, 'archives');
   const extractDir = join(work, 'extract');
   await mkdir(archiveDir, { recursive: true });
@@ -397,7 +391,7 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
         label: `Downloading ${asset.name}`,
       });
       const actual = await sha256File(archive);
-      const check = await checksumFor(asset, release, options);
+      const check = await checksumFor(asset, release, options, index === 0);
       if (check.expected && check.expected !== actual) {
         throw new Error(`Checksum mismatch for ${asset.name}. Expected ${check.expected}, got ${actual}.`);
       }
@@ -413,12 +407,12 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
     }
     const binary = await locateServerBinary(extractDir);
     if (!binary) throw new Error('No llama-server binary found inside the release archive');
-    await rm(installDir, { recursive: true, force: true });
-    await mkdir(installDir, { recursive: true });
+    await rm(staging, { recursive: true, force: true });
+    await mkdir(staging, { recursive: true });
     const entries = await readdir(extractDir, { withFileTypes: true });
     for (const entry of entries) {
       const source = join(extractDir, entry.name);
-      const target = join(installDir, entry.name);
+      const target = join(staging, entry.name);
       if (entry.isDirectory()) {
         await copyDir(source, target);
       } else {
@@ -426,6 +420,8 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
         if (/^(llama-server|server)(\.exe)?$/i.test(entry.name)) await chmod(target, 0o755).catch(() => undefined);
       }
     }
+    await rm(installDir, { recursive: true, force: true });
+    await rename(staging, installDir);
     const installedBinary = await locateServerBinary(installDir);
     if (!installedBinary) throw new Error('llama-server was extracted but could not be found');
     await chmod(installedBinary, 0o755).catch(() => undefined);
@@ -448,6 +444,7 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
     return install;
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

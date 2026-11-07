@@ -84,6 +84,7 @@ export class LlamaRunner extends EventEmitter {
   private startPromise: Promise<LlamaProps> | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
   private _restarts = 0;
+  private failuresSinceReady = 0;
 
   constructor(options: LlamaRunnerOptions) {
     super();
@@ -127,7 +128,9 @@ export class LlamaRunner extends EventEmitter {
     ];
     this.logger?.info('Starting llama-server', { port, context: this.options.context, slots: this.options.slots ?? 1 });
     await mkdir(logsDir(), { recursive: true }).catch(() => undefined);
+    if (this.stopping) throw new Error('llama-server start was cancelled');
     const logFile = this.options.logFile ?? join(logsDir(), 'llama-server.log');
+    this.logStream?.end();
     this.logStream = createWriteStream(logFile, { flags: 'a' });
     const child = spawn(this.options.binaryPath, args, {
       env: { ...process.env, ...this.options.env },
@@ -151,6 +154,7 @@ export class LlamaRunner extends EventEmitter {
       this.setStatus('failed');
       this.emit('fatal', error);
     });
+    let ready = false;
     child.once('exit', (code, signal) => {
       const wasStopping = this.stopping;
       this.child = null;
@@ -161,6 +165,7 @@ export class LlamaRunner extends EventEmitter {
         return;
       }
       handleLine(`llama-server exited (${code ?? signal ?? 'unknown'})`);
+      if (!ready) return;
       this.emit('crash', { code, signal });
       this.scheduleRestart();
     });
@@ -171,11 +176,13 @@ export class LlamaRunner extends EventEmitter {
       if (seen > 0 && seen < this.options.context) {
         throw new Error(`llama-server loaded context ${seen}, below the locked ${this.options.context}`);
       }
+      ready = true;
+      this.failuresSinceReady = 0;
       this.setStatus('ready');
       this.emit('ready', props);
       return props;
     } catch (error) {
-      this.setStatus('failed');
+      this.setStatus(this.stopping ? 'stopped' : 'failed');
       child.removeAllListeners('exit');
       this.child = null;
       this._pid = null;
@@ -207,6 +214,7 @@ export class LlamaRunner extends EventEmitter {
   }
 
   private scheduleRestart(): void {
+    if (this.stopping) return;
     const restart = this.options.restart;
     if (restart === false) {
       this.setStatus('failed');
@@ -216,17 +224,25 @@ export class LlamaRunner extends EventEmitter {
     const windowMs = restart?.windowMs ?? 120_000;
     const now = Date.now();
     this.restartTimes = this.restartTimes.filter((t) => now - t < windowMs);
-    if (this.restartTimes.length >= maxRestarts) {
+    const reason = this.failuresSinceReady >= maxRestarts
+      ? `llama-server did not become ready after ${this.failuresSinceReady} restarts`
+      : this.restartTimes.length >= maxRestarts
+        ? `llama-server crashed ${this.restartTimes.length} times in ${Math.round(windowMs / 1000)}s`
+        : null;
+    if (reason) {
       this.setStatus('failed');
-      this.emit('fatal', new Error(`llama-server crashed ${this.restartTimes.length} times in ${Math.round(windowMs / 1000)}s`));
+      this.emit('fatal', new Error(reason));
       return;
     }
     this.restartTimes.push(now);
+    this.failuresSinceReady++;
     this._restarts++;
     this.setStatus('restarting');
     const delay = restart?.delayMs ?? 500;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
+      if (this.stopping) return;
       void this.start().catch((error) => {
         this.logger?.error('llama-server restart failed', { error: error instanceof Error ? error.message : String(error) });
         this.scheduleRestart();

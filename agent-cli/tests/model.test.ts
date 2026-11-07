@@ -51,6 +51,7 @@ test('a resumable download appends only the missing range and verifies SHA', asy
     const part = `${dest}.part`;
     const already = 100;
     await writeFile(part, MODEL.subarray(0, already));
+    await writeFile(`${part}.json`, JSON.stringify({ url }));
     const progress: number[] = [];
     const loaded = await downloadModel({
       url,
@@ -71,6 +72,7 @@ test('a resumable download appends only the missing range and verifies SHA', asy
     const sidecar = JSON.parse(await readFile(`${dest}.kiln.json`, 'utf8')) as { sha256: string; size: number };
     assert.equal(sidecar.sha256, SHA);
     assert.equal(sidecar.size, MODEL.length);
+    await assert.rejects(stat(`${part}.json`), /ENOENT/);
   } finally {
     server.close();
     await rm(dir, { recursive: true, force: true });
@@ -89,10 +91,46 @@ test('a server that ignores Range restarts the file instead of corrupting it', a
     const dest = modelPathFor(url, dir);
     const garbage = Buffer.from('garbage that must be discarded');
     await writeFile(`${dest}.part`, garbage);
+    await writeFile(`${dest}.part.json`, JSON.stringify({ url }));
     const loaded = await downloadModel({ url, cacheDir: dir, expectedSha256: SHA, showProgress: false });
     assert.equal(loaded.sha256, SHA);
     assert.deepEqual(await readFile(dest), MODEL);
     assert.equal(ranges[0], `bytes=${garbage.length}-`);
+  } finally {
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a partial started for another URL is discarded instead of resumed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiln-model-'));
+  const ranges: string[] = [];
+  const { server, url } = await withServer((req, res) => {
+    const range = req.headers.range;
+    ranges.push(range || 'none');
+    const start = range ? Number(range.match(/bytes=(\d+)-/)?.[1] || 0) : 0;
+    res.writeHead(range ? 206 : 200, {
+      'content-type': 'application/octet-stream',
+      'content-length': MODEL.length - start,
+      ...(range ? { 'content-range': `bytes ${start}-${MODEL.length - 1}/${MODEL.length}` } : {}),
+    });
+    res.end(MODEL.subarray(start));
+  });
+  try {
+    const dest = modelPathFor(url, dir);
+    const other = Buffer.from('bytes from a different repo with the same file name');
+    for (const source of [JSON.stringify({ url: 'https://huggingface.co/other/repo/resolve/main/model.gguf' }), null]) {
+      ranges.length = 0;
+      await rm(dest, { force: true });
+      await rm(`${dest}.kiln.json`, { force: true });
+      await writeFile(`${dest}.part`, other);
+      if (source) await writeFile(`${dest}.part.json`, source);
+      else await rm(`${dest}.part.json`, { force: true });
+      const loaded = await downloadModel({ url, cacheDir: dir, showProgress: false });
+      assert.equal(ranges[0], 'none');
+      assert.equal(loaded.sha256, SHA);
+      assert.deepEqual(await readFile(dest), MODEL);
+    }
   } finally {
     server.close();
     await rm(dir, { recursive: true, force: true });
