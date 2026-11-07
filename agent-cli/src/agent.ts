@@ -9,7 +9,7 @@ import type { GpuSnapshot, GpuStats } from './hardware/types.js';
 import { SleepGuard } from './hardware/sleepGuard.js';
 import { ensureLlamaServer, type LlamaInstall } from './engine/binaryManager.js';
 import { downloadModel, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
-import { estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
+import { checkModelUrl, estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
 import { LlamaRunner } from './engine/llamaRunner.js';
 import { canarySimulation, runCanary, simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
@@ -851,7 +851,9 @@ export class Agent extends EventEmitter {
     try {
       this.tunnel?.send({ type: 'progress', requestId, note: 'Starting download' });
       const context = Math.max(Number(load.context || this.options.context || 8192), 2048);
-      const model = await this.loadModel(load.url, {
+      // The server may only point at a HuggingFace download, never at a file or address on this machine.
+      const url = checkModelUrl(String(load.url || ''));
+      const model = await this.loadModel(url, {
         context,
         requestId,
         expectedSha: load.sha256,
