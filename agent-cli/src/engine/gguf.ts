@@ -242,6 +242,74 @@ export function parseHfUrl(raw: string): HfParsedUrl | null {
   };
 }
 
+// HuggingFace stores at most 50 GB per file, so a bigger single GGUF is not a real Hub model.
+export const MAX_MODEL_BYTES = 64 * 1024 ** 3;
+const MAX_REDIRECTS = 5;
+
+export type ModelUrlOptions = {
+  /** Unit tests only: allow http(s) downloads from a loopback address. */
+  allowLocalhost?: boolean;
+};
+
+function isLoopback(hostname: string): boolean {
+  return /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(hostname);
+}
+
+function isHfHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return ['huggingface.co', 'hf.co'].some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function checkModelHop(url: URL, options: ModelUrlOptions): void {
+  if (url.username || url.password) throw new Error('Model URLs must not contain credentials');
+  if (options.allowLocalhost && isLoopback(url.hostname) && /^https?:$/.test(url.protocol)) return;
+  if (url.protocol !== 'https:') throw new Error(`Model downloads must use https:// (refused ${url.protocol}//${url.host})`);
+  if (url.port && url.port !== '443') throw new Error(`Model downloads must use the default https port (refused ${url.host})`);
+  if (!isHfHost(url.hostname)) throw new Error(`Model downloads are limited to HuggingFace (refused ${url.hostname})`);
+}
+
+/** Validates a model link and returns the canonical HuggingFace resolve URL to download. */
+export function checkModelUrl(raw: string, options: ModelUrlOptions = {}): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('Model URL is not a valid URL');
+  }
+  checkModelHop(url, options);
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    throw new Error('Model URL has an invalid path');
+  }
+  const refused = rejectModelFile(path);
+  if (refused) throw new Error(refused);
+  if (options.allowLocalhost && isLoopback(url.hostname)) return url.href;
+  const parsed = parseHfUrl(url.href);
+  if (!parsed) throw new Error('Use a full HuggingFace link to a .gguf file, like https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf');
+  return parsed.downloadUrl;
+}
+
+/** fetch() that follows redirects itself, so every hop must also be https on HuggingFace. */
+export async function fetchModelUrl(
+  url: string,
+  init: Omit<RequestInit, 'redirect'>,
+  options: ModelUrlOptions & { fetchImpl?: typeof fetch } = {},
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let current = new URL(url);
+  for (let hop = 0; ; hop++) {
+    checkModelHop(current, options);
+    const response = await fetchImpl(current.href, { ...init, redirect: 'manual' });
+    const location = response.headers.get('location');
+    if (response.status < 300 || response.status >= 400 || !location) return response;
+    await response.body?.cancel().catch(() => undefined);
+    if (hop >= MAX_REDIRECTS) throw new Error('Too many redirects while fetching the model');
+    current = new URL(location, current);
+  }
+}
+
 export type HfFileInfo = { sha256: string | null; size: number | null; siblings: string[] };
 
 export async function fetchHfFileInfo(repo: string, file: string, timeoutMs = 15_000): Promise<HfFileInfo> {
@@ -307,10 +375,9 @@ export async function inspectHuggingFace(rawUrl: string, timeoutMs = 15_000): Pr
     /* still try header */
   }
   try {
-    const response = await fetch(parsed.downloadUrl, {
+    const response = await fetchModelUrl(parsed.downloadUrl, {
       headers: { range: 'bytes=0-4194303', 'user-agent': USER_AGENT },
       signal,
-      redirect: 'follow',
     });
     if (response.ok || response.status === 206) {
       const buf = Buffer.from(await response.arrayBuffer());

@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -27,6 +27,16 @@ export async function fileSize(path: string): Promise<number> {
 
 export async function removeIfExists(path: string): Promise<void> {
   await rm(path, { force: true, recursive: true });
+}
+
+/** Bytes available to this user on the disk that holds `dir`, or null when the OS cannot tell. */
+export async function freeDiskBytes(dir: string): Promise<number | null> {
+  try {
+    const info = await statfs(dir);
+    return info.bavail * info.bsize;
+  } catch {
+    return null;
+  }
 }
 
 export async function atomicWrite(path: string, data: string, mode = 0o600): Promise<void> {

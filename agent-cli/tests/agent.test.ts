@@ -114,3 +114,24 @@ test('a live host with no model answers with an error, not simulated text', asyn
     await server.close();
   }
 });
+
+test('a server load that points at a local file is refused before anything is read', async () => {
+  const server = await fakeServer({
+    onSocket: (socket) => {
+      setTimeout(() => socket.send(JSON.stringify({ type: 'load', requestId: 'r1', url: '/home/host/.ssh/id_ed25519', context: 4096 })), 100);
+    },
+  });
+  const agent = agentFor(server.url, true);
+  try {
+    void agent.run().catch(() => undefined);
+    const deadline = Date.now() + 5_000;
+    while (!server.frames.some((f) => f.type === 'load_failed') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    const failed = server.frames.find((f) => f.type === 'load_failed');
+    assert.equal(failed?.requestId, 'r1');
+    assert.match(String(failed?.message), /valid URL/);
+    assert.equal(server.frames.some((f) => f.type === 'loaded'), false);
+  } finally {
+    await agent.stop();
+    await server.close();
+  }
+});

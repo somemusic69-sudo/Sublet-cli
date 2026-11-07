@@ -189,8 +189,13 @@ from zero rather than corrupting weights.
     `Authorization: Bearer` header so the key is not placed in the WebSocket
     URL or proxy access logs. If an older server rejects header auth, the CLI
     retries once with the legacy query-token form.
-11. **HTTPS-only model downloads.** GGUF downloads must be `https://`;
-    localhost is allowed only for the test harness.
+11. **HuggingFace-only model downloads.** A model URL must be an `https://`
+    link to a `.gguf` file on `huggingface.co` or `hf.co`. The agent follows
+    redirects itself, and every redirect must also stay on HuggingFace over
+    `https://`, so a model link can never reach the host's own machine or local
+    network. A server `load` must be such a URL, never a local path. A download
+    stops at its announced size (at most 64 GB) and does not start without
+    enough free disk space. Only the unit tests can opt into localhost.
 12. **Dashboard controls.** In an interactive terminal: `W` opens the wallet /
     withdraw page, `C` copies the host endpoint, `L` toggles the llama log tail,
     and `?` shows the key help.

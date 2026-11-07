@@ -2,14 +2,17 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { open, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { ensureDir, fileSize, removeIfExists, sha256File } from '../util/fs.js';
+import { ensureDir, fileSize, freeDiskBytes, removeIfExists, sha256File } from '../util/fs.js';
+import { formatBytes } from '../util/format.js';
 import { ProgressBar } from '../ui/progress.js';
 import {
+  checkModelUrl,
   estimateVramMb,
+  fetchModelUrl,
+  MAX_MODEL_BYTES,
   parseGgufHeader,
   parseHfUrl,
   readGgufHeader,
-  rejectModelFile,
   type GgufInfo,
 } from './gguf.js';
 import { modelsDir } from '../config.js';
@@ -54,6 +57,8 @@ export type DownloadModelOptions = {
   showProgress?: boolean;
   stream?: NodeJS.WriteStream;
   slots?: number;
+  /** Unit tests only: allow http(s) downloads from a loopback address. */
+  allowLocalhost?: boolean;
 };
 
 type Sidecar = {
@@ -162,20 +167,17 @@ async function verifyHeader(path: string, expectedLayers: number | null | undefi
 }
 
 export async function downloadModel(options: DownloadModelOptions): Promise<LoadedModel> {
-  const refused = rejectModelFile(options.url.split('?')[0] || '');
-  if (refused) throw new Error(refused);
-  const parsedUrl = new URL(options.url);
-  const localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(parsedUrl.hostname);
-  if (parsedUrl.protocol !== 'https:' && !localHost) {
-    throw new Error('Model downloads must use https:// (localhost is allowed for tests)');
-  }
+  const url = checkModelUrl(options.url, { allowLocalhost: options.allowLocalhost });
   const cacheDir = options.cacheDir ?? modelsDir();
   await ensureDir(cacheDir);
-  const dest = modelPathFor(options.url, cacheDir);
+  const dest = modelPathFor(url, cacheDir);
   const part = `${dest}.part`;
   const context = options.context ?? 8192;
   const slots = options.slots ?? 1;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchModel = (headers: Record<string, string>) => fetchModelUrl(url, { headers, signal: options.signal }, {
+    allowLocalhost: options.allowLocalhost,
+    fetchImpl: options.fetchImpl,
+  });
 
   if (await fileExists(dest)) {
     const infoStat = await stat(dest);
@@ -186,7 +188,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       try {
         const info = await readGgufHeader(dest);
         const verified = Boolean(options.expectedSha256);
-        return loadedFrom(dest, options.url, cached?.sha256 || '', size, info, verified, context, slots);
+        return loadedFrom(dest, url, cached?.sha256 || '', size, info, verified, context, slots);
       } catch {
         await removeIfExists(dest);
       }
@@ -203,7 +205,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
           throw new Error(`GGUF has ${info.layers} layers, expected ${options.expectedLayers}`);
         }
         await writeSidecar(dest, actual, info, size);
-        return loadedFrom(dest, options.url, actual, size, info, Boolean(options.expectedSha256), context, slots);
+        return loadedFrom(dest, url, actual, size, info, Boolean(options.expectedSha256), context, slots);
       } catch {
         await removeIfExists(dest);
       }
@@ -211,7 +213,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   }
 
   let startAt = (await fileExists(part)) ? await fileSize(part) : 0;
-  if (startAt > 0 && await readPartSource(part) !== options.url) {
+  if (startAt > 0 && await readPartSource(part) !== url) {
     await removeIfExists(part);
     startAt = 0;
   }
@@ -221,17 +223,13 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   if (startAt > 0) headers.range = `bytes=${startAt}-`;
 
   try {
-    response = await fetchImpl(options.url, {
-      headers,
-      redirect: 'follow',
-      signal: options.signal,
-    });
+    response = await fetchModel(headers);
   } catch (error) {
     if (startAt > 0) {
       // A stale partial should never wedge the download. Retry from zero once.
       await removeIfExists(part);
       startAt = 0;
-      response = await fetchImpl(options.url, { headers: { 'user-agent': USER_AGENT }, redirect: 'follow', signal: options.signal });
+      response = await fetchModel({ 'user-agent': USER_AGENT });
     } else {
       throw new Error(`Download failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -240,7 +238,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   if (response.status === 416) {
     await removeIfExists(part);
     startAt = 0;
-    response = await fetchImpl(options.url, { headers: { 'user-agent': USER_AGENT }, redirect: 'follow', signal: options.signal });
+    response = await fetchModel({ 'user-agent': USER_AGENT });
   }
   if (!response.ok || !response.body) {
     throw new Error(`Download failed with HTTP ${response.status}`);
@@ -264,6 +262,17 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   }
   const contentLength = Number(response.headers.get('content-length') || 0);
   if (!total && contentLength > 0) total = startAt + contentLength;
+  const limit = Math.min(total ?? MAX_MODEL_BYTES, MAX_MODEL_BYTES);
+  const free = await freeDiskBytes(cacheDir);
+  const refusal = total && total > MAX_MODEL_BYTES
+    ? `The model is ${formatBytes(total)}, above the ${formatBytes(MAX_MODEL_BYTES)} limit for one GGUF file`
+    : total && free != null && total - startAt > free
+      ? `Not enough disk space: ${formatBytes(total - startAt)} is needed, ${formatBytes(free)} is free in ${cacheDir}`
+      : null;
+  if (refusal) {
+    await response.body.cancel().catch(() => undefined);
+    throw new Error(refusal);
+  }
 
   const hash = createHash('sha256');
   if (append) {
@@ -284,9 +293,10 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     stream: options.stream ?? process.stderr,
   });
 
-  await writeFile(partSourcePath(part), JSON.stringify({ url: options.url }), 'utf8');
+  await writeFile(partSourcePath(part), JSON.stringify({ url }), 'utf8');
   const writer = createWriteStream(part, { flags: append ? 'a' : 'w' });
   let received = startAt;
+  let oversized = false;
   const started = Date.now();
   const reader = response.body.getReader();
   try {
@@ -295,6 +305,10 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       if (done) break;
       if (options.signal?.aborted) throw new Error('Download cancelled');
       if (!value?.length) continue;
+      if (received + value.length > limit) {
+        oversized = true;
+        throw new Error(`The download is larger than the expected ${formatBytes(limit)}; the file was rejected`);
+      }
       hash.update(value);
       received += value.length;
       if (!writer.write(Buffer.from(value))) {
@@ -323,8 +337,13 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     }
     await new Promise<void>((resolve, reject) => writer.end((error?: Error | null) => error ? reject(error) : resolve()));
   } catch (error) {
-    writer.destroy();
+    if (!writer.closed) await new Promise<void>((resolve) => writer.once('close', () => resolve()).destroy());
+    await reader.cancel().catch(() => undefined);
     bar?.fail();
+    if (oversized) {
+      await removeIfExists(part);
+      await removeIfExists(partSourcePath(part));
+    }
     throw error;
   }
   bar?.done();
@@ -347,7 +366,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     etaSeconds: 0,
     note: 'Verifying GGUF header',
   }, null);
-  const model = await verifyHeader(dest, options.expectedLayers, actual, options.url, context, slots);
+  const model = await verifyHeader(dest, options.expectedLayers, actual, url, context, slots);
   emitProgress(options, {
     phase: 'header',
     received,

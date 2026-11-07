@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { downloadModel, modelPathFor, verifyModelFile } from '../src/engine/modelManager.js';
-import { BufferWriter, buildGgufSample } from '../src/engine/gguf.js';
+import { BufferWriter, buildGgufSample, checkModelUrl, fetchModelUrl } from '../src/engine/gguf.js';
 
 const MODEL = buildGgufSample([
   { key: 'general.architecture', type: 8, write: (b) => b.str('llama') },
@@ -56,6 +56,7 @@ test('a resumable download appends only the missing range and verifies SHA', asy
     const loaded = await downloadModel({
       url,
       cacheDir: dir,
+      allowLocalhost: true,
       expectedSha256: SHA,
       expectedLayers: 32,
       context: 8192,
@@ -92,7 +93,7 @@ test('a server that ignores Range restarts the file instead of corrupting it', a
     const garbage = Buffer.from('garbage that must be discarded');
     await writeFile(`${dest}.part`, garbage);
     await writeFile(`${dest}.part.json`, JSON.stringify({ url }));
-    const loaded = await downloadModel({ url, cacheDir: dir, expectedSha256: SHA, showProgress: false });
+    const loaded = await downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false });
     assert.equal(loaded.sha256, SHA);
     assert.deepEqual(await readFile(dest), MODEL);
     assert.equal(ranges[0], `bytes=${garbage.length}-`);
@@ -126,7 +127,7 @@ test('a partial started for another URL is discarded instead of resumed', async 
       await writeFile(`${dest}.part`, other);
       if (source) await writeFile(`${dest}.part.json`, source);
       else await rm(`${dest}.part.json`, { force: true });
-      const loaded = await downloadModel({ url, cacheDir: dir, showProgress: false });
+      const loaded = await downloadModel({ url, cacheDir: dir, allowLocalhost: true, showProgress: false });
       assert.equal(ranges[0], 'none');
       assert.equal(loaded.sha256, SHA);
       assert.deepEqual(await readFile(dest), MODEL);
@@ -146,7 +147,7 @@ test('a bad hash is rejected and both files are removed', async () => {
   try {
     const dest = modelPathFor(url, dir);
     await assert.rejects(
-      downloadModel({ url, cacheDir: dir, expectedSha256: '0'.repeat(64), showProgress: false }),
+      downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: '0'.repeat(64), showProgress: false }),
       /SHA-256 mismatch/,
     );
     await assert.rejects(stat(dest), /ENOENT/);
@@ -165,7 +166,7 @@ test('a layer mismatch is rejected after the hash passes', async () => {
   });
   try {
     await assert.rejects(
-      downloadModel({ url, cacheDir: dir, expectedSha256: SHA, expectedLayers: 80, showProgress: false }),
+      downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, expectedLayers: 80, showProgress: false }),
       /layers/,
     );
   } finally {
@@ -183,8 +184,8 @@ test('cached files are reused without another request', async () => {
     res.end(MODEL);
   });
   try {
-    const first = await downloadModel({ url, cacheDir: dir, expectedSha256: SHA, showProgress: false });
-    const second = await downloadModel({ url, cacheDir: dir, expectedSha256: SHA, showProgress: false });
+    const first = await downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false });
+    const second = await downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false });
     assert.equal(requests, 1);
     assert.equal(first.path, second.path);
     const verified = await verifyModelFile(first.path, { sha256: SHA, layers: 32 });
@@ -202,3 +203,78 @@ test('remote model downloads must be https', async () => {
   );
 });
 
+
+test('model links are limited to https HuggingFace downloads', () => {
+  const canonical = 'https://huggingface.co/org/repo/resolve/main/model-Q4_K_M.gguf';
+  assert.equal(checkModelUrl(canonical), canonical);
+  assert.equal(checkModelUrl('https://hf.co/org/repo/blob/main/model-Q4_K_M.gguf'), canonical);
+  assert.throws(() => checkModelUrl('http://huggingface.co/org/repo/resolve/main/model.gguf'), /https/);
+  assert.throws(() => checkModelUrl('https://example.com/org/repo/resolve/main/model.gguf'), /limited to HuggingFace/);
+  assert.throws(() => checkModelUrl('https://huggingface.co.example.com/org/repo/resolve/main/model.gguf'), /limited to HuggingFace/);
+  assert.throws(() => checkModelUrl('https://user:pass@huggingface.co/org/repo/resolve/main/model.gguf'), /credentials/);
+  assert.throws(() => checkModelUrl('https://huggingface.co:8443/org/repo/resolve/main/model.gguf'), /port/);
+  assert.throws(() => checkModelUrl('https://huggingface.co/org/repo/resolve/main/model.bin#.gguf'), /GGUF/);
+  assert.throws(() => checkModelUrl('/home/host/.ssh/id_ed25519'), /valid URL/);
+});
+
+test('localhost model downloads need the explicit test opt-in', () => {
+  assert.throws(() => checkModelUrl('http://127.0.0.1:8080/admin#.gguf'), /https/);
+  assert.throws(() => checkModelUrl('https://localhost/model.gguf'), /limited to HuggingFace/);
+  assert.throws(() => checkModelUrl('http://127.0.0.1:8080/admin#.gguf', { allowLocalhost: true }), /\.gguf/i);
+  assert.equal(checkModelUrl('http://127.0.0.1:8080/model.gguf', { allowLocalhost: true }), 'http://127.0.0.1:8080/model.gguf');
+});
+
+function stubFetch(routes: Record<string, () => Response>): { fetchImpl: typeof fetch; calls: { url: string; range: string | null; redirect?: string }[] } {
+  const calls: { url: string; range: string | null; redirect?: string }[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, range: new Headers(init?.headers).get('range'), redirect: init?.redirect });
+    const route = routes[url];
+    if (!route) throw new Error(`unexpected request to ${url}`);
+    return route();
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+const redirect = (location: string) => () => new Response(null, { status: 302, headers: { location } });
+
+test('model redirects are followed only while they stay on HuggingFace', async () => {
+  const start = 'https://huggingface.co/org/repo/resolve/main/model.gguf';
+  const cdn = 'https://us.aws.cdn.hf.co/xet-bridge-us/abc?sig=1';
+  const ok = stubFetch({ [start]: redirect(cdn), [cdn]: () => new Response('GGUF', { status: 206 }) });
+  const response = await fetchModelUrl(start, { headers: { range: 'bytes=0-3' } }, { fetchImpl: ok.fetchImpl });
+  assert.equal(await response.text(), 'GGUF');
+  assert.deepEqual(ok.calls.map((c) => [c.url, c.range, c.redirect]), [[start, 'bytes=0-3', 'manual'], [cdn, 'bytes=0-3', 'manual']]);
+
+  for (const target of ['http://us.aws.cdn.hf.co/x', 'https://192.168.1.10/model.gguf', 'http://127.0.0.1:5000/admin', 'https://evil.example.com/model.gguf']) {
+    const bad = stubFetch({ [start]: redirect(target) });
+    await assert.rejects(fetchModelUrl(start, {}, { fetchImpl: bad.fetchImpl }), /https|HuggingFace/, target);
+    assert.equal(bad.calls.length, 1, `${target} must not be requested`);
+  }
+
+  const loop = stubFetch({ [start]: redirect(start) });
+  await assert.rejects(fetchModelUrl(start, {}, { fetchImpl: loop.fetchImpl }), /Too many redirects/);
+});
+
+test('a download that streams past the expected size is cut off and removed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const { server, url } = await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    res.write(MODEL);
+    res.write(MODEL);
+    res.end(MODEL);
+  });
+  try {
+    await assert.rejects(
+      downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSize: MODEL.length, showProgress: false }),
+      /larger than the expected/,
+    );
+    const part = `${modelPathFor(url, dir)}.part`;
+    await assert.rejects(stat(part), /ENOENT/);
+    await assert.rejects(stat(`${part}.json`), /ENOENT/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
