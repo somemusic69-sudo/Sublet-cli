@@ -83,7 +83,7 @@ test('tunnel connects, sends hello, heartbeats, and reconnects after a drop', as
   });
   const tunnel = new TunnelClient({
     server: `http://127.0.0.1:${server.port}`,
-    token: 'kh_test',
+    token: 'sh_test',
     hello,
     heartbeat,
     heartbeatMs: 50,
@@ -94,7 +94,7 @@ test('tunnel connects, sends hello, heartbeats, and reconnects after a drop', as
     tunnel.start();
     await tunnel.waitForWelcome(5_000);
     assert.equal(tunnel.username, 'ada');
-    assert.equal(auth[0], 'Bearer kh_test');
+    assert.equal(auth[0], 'Bearer sh_test');
     assert.ok(!urls[0]?.includes('token='), 'host key must not be in the URL');
     await new Promise((r) => setTimeout(r, 180));
     assert.ok(heartbeats >= 1);
@@ -115,7 +115,7 @@ test('a rejected host key stops reconnecting', async () => {
   });
   const tunnel = new TunnelClient({
     server: `http://127.0.0.1:${server.port}`,
-    token: 'kh_bad',
+    token: 'sh_bad',
     hello,
     reconnectDelaysMs: [30],
   });
@@ -139,7 +139,7 @@ test('a server that requires a newer agent stops reconnecting with an update hin
   });
   const tunnel = new TunnelClient({
     server: `http://127.0.0.1:${server.port}`,
-    token: 'kh_test',
+    token: 'sh_test',
     hello,
     reconnectDelaysMs: [30],
   });
@@ -149,7 +149,7 @@ test('a server that requires a newer agent stops reconnecting with an update hin
     tunnel.start();
     const error = await outdated;
     assert.match(error.message, /needs v1\.4\.0/);
-    assert.match(error.message, /npx kiln-agent@latest/);
+    assert.match(error.message, /npx sublet-cli@latest/);
     await assert.rejects(welcome, /too old/);
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(tunnel.state, 'outdated');
@@ -172,7 +172,7 @@ test('an HTTP 401 at the tunnel handshake is treated as a rejected key', async (
   const port = typeof address === 'object' && address ? address.port : 0;
   const tunnel = new TunnelClient({
     server: `http://127.0.0.1:${port}`,
-    token: 'kh_bad',
+    token: 'sh_bad',
     hello,
     reconnectDelaysMs: [30],
   });
@@ -202,7 +202,7 @@ test('a tunnel that stops answering pings is torn down and reconnected', async (
   const port = typeof address === 'object' && address ? address.port : 0;
   const tunnel = new TunnelClient({
     server: `http://127.0.0.1:${port}`,
-    token: 'kh_test',
+    token: 'sh_test',
     hello,
     pingIntervalMs: 40,
     staleAfterMs: 150,
@@ -227,7 +227,7 @@ test('server frames named like internal events do not crash or spoof the tunnel'
     socket.send(JSON.stringify({ type: 'error', message: 'rate limited' }));
     socket.send(JSON.stringify({ type: 'auth-failed' }));
   });
-  const tunnel = new TunnelClient({ server: `http://127.0.0.1:${server.port}`, token: 'kh_test', hello });
+  const tunnel = new TunnelClient({ server: `http://127.0.0.1:${server.port}`, token: 'sh_test', hello });
   try {
     const seen: string[] = [];
     let spoofed = false;

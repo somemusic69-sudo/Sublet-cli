@@ -13,7 +13,7 @@ We will acknowledge the report and coordinate a fix and disclosure date.
 
 ## Host key handling
 
-- Host keys are saved in `~/.kiln/config.json` with mode 0600.
+- Host keys are saved in `~/.sublet/config.json` with mode 0600.
 - The tunnel prefers `Authorization: Bearer`, keeping the key out of URLs.
   The query-token form exists only as a compatibility fallback for older
   servers.
@@ -26,10 +26,10 @@ We will acknowledge the report and coordinate a fix and disclosure date.
 - GGUF files are checked for magic bytes, architecture, layers, and SHA-256
   when HuggingFace publishes an LFS hash.
 - llama.cpp release archives are checked against the GitHub asset digest when
-  available; `kiln doctor --fix --require-checksum` refuses an unpublished
+  available; `sublet doctor --fix --require-checksum` refuses an unpublished
   release.
 - The downloaded llama.cpp binary is hashed and recorded in
-  `~/.kiln/bin/manifest.json`, then re-checked on use.
+  `~/.sublet/bin/manifest.json`, then re-checked on use.
 - Only `.gguf` weights are accepted. Pickle, PyTorch, ONNX, and safetensors
   files are refused.
 - `llama-server` is bound to `127.0.0.1`, runs with `--log-disable`, and is not

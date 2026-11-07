@@ -27,14 +27,14 @@ export function windowsSleepScript(): string {
     "$src = @'",
     'using System;',
     'using System.Runtime.InteropServices;',
-    'public static class KilnSleepGuard {',
+    'public static class SubletSleepGuard {',
     '  [DllImport("kernel32.dll", SetLastError = true)]',
     '  public static extern uint SetThreadExecutionState(uint esFlags);',
     '}',
     "'@",
     'Add-Type -TypeDefinition $src',
     'while ($true) {',
-    '  [KilnSleepGuard]::SetThreadExecutionState([uint32]2147483651) | Out-Null',
+    '  [SubletSleepGuard]::SetThreadExecutionState([uint32]2147483651) | Out-Null',
     '  Start-Sleep -Seconds 20',
     '}',
   ].join('\n');
@@ -111,7 +111,7 @@ export class SleepGuard {
   private startLinux(reason: string): boolean {
     const child = this.spawnFn('systemd-inhibit', [
       '--what=sleep:idle',
-      '--who=kiln-agent',
+      '--who=sublet-cli',
       `--why=${reason.slice(0, 80)}`,
       'tail', `--pid=${process.pid}`, '-f', '/dev/null',
     ], { stdio: 'ignore' });

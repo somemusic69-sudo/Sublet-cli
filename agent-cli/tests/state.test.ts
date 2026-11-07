@@ -24,8 +24,8 @@ const model = {
 };
 
 test('a booking survives a crash and is read back for recovery', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-state-'));
-  const env = { ...process.env, KILN_HOME: home };
+  const home = await mkdtemp(join(tmpdir(), 'sublet-state-'));
+  const env = { ...process.env, SUBLET_HOME: home };
   const state: PersistedState = {
     version: 1,
     updatedAt: Date.now(),
@@ -56,8 +56,8 @@ test('a booking survives a crash and is read back for recovery', async () => {
 });
 
 test('an invalid or old state file is ignored', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-state-'));
-  const env = { ...process.env, KILN_HOME: home };
+  const home = await mkdtemp(join(tmpdir(), 'sublet-state-'));
+  const env = { ...process.env, SUBLET_HOME: home };
   try {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(join(home, 'state.json'), '{"version":2,"booking":{}}', 'utf8');
@@ -70,8 +70,8 @@ test('an invalid or old state file is ignored', async () => {
 });
 
 test('simulation bookings with no local model path are still valid state', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'kiln-state-'));
-  const env = { ...process.env, KILN_HOME: home };
+  const home = await mkdtemp(join(tmpdir(), 'sublet-state-'));
+  const env = { ...process.env, SUBLET_HOME: home };
   const state: PersistedState = {
     version: 1,
     updatedAt: Date.now(),

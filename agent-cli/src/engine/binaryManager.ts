@@ -167,7 +167,7 @@ async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, 
 
 async function checksumFor(asset: ReleaseAsset, release: ReleaseInfo, options: InstallOptions, isMain: boolean): Promise<{ expected: string | null; published: boolean }> {
   const env = options.env ?? process.env;
-  const override = env.KILN_LLAMA_SHA256;
+  const override = env.SUBLET_LLAMA_SHA256;
   if (isMain && override && /^[a-f0-9]{64}$/i.test(override.trim())) return { expected: override.trim().toLowerCase(), published: true };
   if (asset.digest && /^sha256:[a-f0-9]{64}$/i.test(asset.digest)) return { expected: asset.digest.slice(7).toLowerCase(), published: true };
   const sidecar = release.assets.find((a) => new RegExp(`^${escapeRegExp(asset.name)}\\.sha256(?:\\.txt)?$`, 'i').test(a.name));
@@ -341,7 +341,7 @@ export async function ensureLlamaServer(options: InstallOptions & { fix?: boolea
   if (options.simulation) return { found: false, reason: 'Simulation mode: llama-server is not needed.' };
   const existing = await findExistingLlama(options);
   if (existing) return { found: true, install: existing };
-  if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: kiln doctor --fix' };
+  if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: sublet doctor --fix' };
   try {
     const install = await installLlamaServer(options);
     return { found: true, install };

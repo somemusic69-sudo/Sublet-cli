@@ -1,6 +1,6 @@
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { kilnHome } from './config.js';
+import { subletHome } from './config.js';
 import { atomicWrite } from './util/fs.js';
 
 export type PersistedModel = {
@@ -42,7 +42,7 @@ export type PersistedState = {
 };
 
 export function statePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(kilnHome(env), 'state.json');
+  return join(subletHome(env), 'state.json');
 }
 
 export async function readAgentState(env: NodeJS.ProcessEnv = process.env): Promise<PersistedState | null> {

@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Kiln Agent is MIT-licensed. It depends on the following packages; none of their
+Sublet CLI is MIT-licensed. It depends on the following packages; none of their
 code is modified in this repository.
 
 ## Runtime dependencies
@@ -32,5 +32,5 @@ code is modified in this repository.
   responsible for following the model's license and acceptable-use terms.
 - **Node.js** — MIT.
 
-The Kiln marketplace server, wallet, and payment integrations are a separate
+The Sublet marketplace server, wallet, and payment integrations are a separate
 codebase and are not covered by this repository's license.

@@ -81,7 +81,7 @@ export function modelPathFor(url: string, cacheDir = modelsDir()): string {
 }
 
 function sidecarPath(path: string): string {
-  return `${path}.kiln.json`;
+  return `${path}.sublet.json`;
 }
 
 function partSourcePath(part: string): string {

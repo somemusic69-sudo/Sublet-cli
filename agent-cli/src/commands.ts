@@ -3,7 +3,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Agent } from './agent.js';
-import { apiUrl, configPath, kilnHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
+import { apiUrl, configPath, subletHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
 import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION, compareVersions } from './version.js';
 import type { Logger } from './logger.js';
 import { GpuMonitor, checkFit } from './hardware/gpuMonitor.js';
@@ -48,17 +48,17 @@ export type GlobalFlags = {
 };
 
 function serverFor(flags: GlobalFlags, fallback?: string): string {
-  return normalizeServer(flags.server || process.env.KILN_SERVER || fallback || DEFAULT_SERVER);
+  return normalizeServer(flags.server || process.env.SUBLET_SERVER || fallback || DEFAULT_SERVER);
 }
 
 async function resolvedConfig(flags: GlobalFlags, requireToken: boolean): Promise<AgentConfig> {
   const existing = await readConfigFile();
   const token = flags.token || existing?.token || '';
-  if (!token && requireToken) throw new Error('No host key. Run: kiln login, or pass --key <key>');
+  if (!token && requireToken) throw new Error('No host key. Run: sublet login, or pass --key <key>');
   return {
     server: serverFor(flags, existing?.server),
     token,
-    wsPath: flags.wsPath || existing?.wsPath || process.env.KILN_WS_PATH || DEFAULT_WS_PATH,
+    wsPath: flags.wsPath || existing?.wsPath || process.env.SUBLET_WS_PATH || DEFAULT_WS_PATH,
     updatedAt: Date.now(),
   };
 }
@@ -67,7 +67,7 @@ async function promptToken(): Promise<string> {
   if (!process.stdin.isTTY) throw new Error('No TTY to prompt. Pass --key <host key> or pipe the key on stdin.');
   const rl = createInterface({ input, output });
   try {
-    const answer = await rl.question('Paste the host key from the Kiln dashboard: ');
+    const answer = await rl.question('Paste the host key from the Sublet dashboard: ');
     return answer.trim();
   } finally {
     rl.close();
@@ -104,8 +104,8 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
     output.write(`${JSON.stringify({ ok: true, server, username: me?.user.username || null, config: configPath() })}\n`);
   } else {
     logger.success(`Saved host key for ${me?.user.username ? `@${me.user.username}` : 'this machine'}`, { config: configPath() });
-    if (!me) logger.warn('The server does not expose /api/agent/me yet. The key is saved, but verify it with: kiln doctor');
-    output.write(`\n${BRAND} agent is configured. Next: kiln doctor, then kiln start\n`);
+    if (!me) logger.warn('The server does not expose /api/agent/me yet. The key is saved, but verify it with: sublet doctor');
+    output.write(`\n${BRAND} agent is configured. Next: sublet doctor, then sublet start\n`);
   }
   return 0;
 }
@@ -143,7 +143,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
       checks.push(check('Host key', 'fail', error instanceof Error ? error.message : String(error)));
     }
   } else {
-    checks.push(check('Host key', 'warn', 'Not saved. Run: kiln login'));
+    checks.push(check('Host key', 'warn', 'Not saved. Run: sublet login'));
   }
 
   try {
@@ -186,7 +186,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   if (install) {
     checks.push(check('llama-server', install.verified ? 'ok' : 'warn', `${install.path} · ${install.variant} · ${install.verified ? 'checksum verified' : 'local hash recorded, no published checksum'}`));
   } else if (!flags.fix) {
-    checks.push(check('llama-server', 'warn', `Not installed. Run: kiln doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
+    checks.push(check('llama-server', 'warn', `Not installed. Run: sublet doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
   }
 
   const models = await listModels();
@@ -197,13 +197,13 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
     output.write(`${JSON.stringify({ ok: failures.length === 0, checks, server, config: configPath(), gpu, llama: install, me }, null, 2)}\n`);
   } else {
     output.write(`\n${BRAND} agent doctor\n`);
-    output.write(`home: ${kilnHome()}\nserver: ${server}\nkey: ${maskToken(cfg.token)}\n\n`);
+    output.write(`home: ${subletHome()}\nserver: ${server}\nkey: ${maskToken(cfg.token)}\n\n`);
     for (const item of checks) {
       const mark = item.status === 'ok' ? '[ ok ]' : item.status === 'warn' ? '[warn]' : '[fail]';
       output.write(`${mark} ${padRight(item.name, 15)} ${item.detail}\n`);
     }
     output.write(`\n${failures.length ? `${failures.length} check(s) failed.` : 'All blocking checks passed.'}\n`);
-    if (!flags.fix && !install) output.write(`Tip: kiln doctor --fix downloads the matching llama-server build.\n`);
+    if (!flags.fix && !install) output.write(`Tip: sublet doctor --fix downloads the matching llama-server build.\n`);
   }
   return failures.length ? 1 : 0;
 }
@@ -248,7 +248,7 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
 
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
   const model = flags.model || flags.positionals[0];
-  if (!model) throw new Error('Usage: kiln host <huggingface-gguf-url|path.gguf> --price 0.25');
+  if (!model) throw new Error('Usage: sublet host <huggingface-gguf-url|path.gguf> --price 0.25');
   if (!flags.simulation && !/^https?:\/\//i.test(model)) {
     try {
       await stat(model);
@@ -481,7 +481,7 @@ async function claimRequest(cfg: AgentConfig, requestId: string, quiet = false):
     });
     if (!quiet) {
       output.write(`Claimed ${requestId}${result.status ? ` (${result.status})` : ''}.\n`);
-      output.write('The running `kiln start` agent will download and verify the model, then the server starts the clock after the canary.\n');
+      output.write('The running `sublet start` agent will download and verify the model, then the server starts the clock after the canary.\n');
     }
     return result;
   } catch (error) {
@@ -500,7 +500,7 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
     return 0;
   }
   if (!me) {
-    logger.warn('Server does not expose /api/agent/me. Try: kiln doctor');
+    logger.warn('Server does not expose /api/agent/me. Try: sublet doctor');
     return 0;
   }
   const host = me.host;
@@ -533,10 +533,10 @@ export function globalHelp(): string {
   return [
     `${BRAND} GPU Terminal Agent v${VERSION}`,
     '',
-    'Usage: kiln <command> [options]',
+    'Usage: sublet <command> [options]',
     '',
     'Commands:',
-    '  login                 Save the host key from the Kiln dashboard',
+    '  login                 Save the host key from the Sublet dashboard',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
     '  start                 Connect and wait for web requests / bookings',
     '  host <gguf>           Serve a public pay-per-token model',
@@ -545,7 +545,7 @@ export function globalHelp(): string {
     '  logout                Remove the saved host key',
     '',
     'Core options:',
-    '  --key <key>           Host key (kh_...) instead of the saved key',
+    '  --key <key>           Host key (sh_...) instead of the saved key',
     '  --server <url>        Central server (default: http://127.0.0.1:8787)',
     '  --ws-path <path>      Tunnel path (default: /tunnel)',
     '  --simulation          Test the full pipe without a GPU or GGUF',
@@ -569,11 +569,11 @@ export function globalHelp(): string {
     '  --help, --version',
     '',
     'Examples:',
-    '  kiln login --key kh_...',
-    '  kiln doctor --fix',
-    '  kiln start',
-    '  kiln start --simulation --gpu "RTX 4060" --vram 8188',
-    '  kiln host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
-    '  kiln jobs',
+    '  sublet login --key sh_...',
+    '  sublet doctor --fix',
+    '  sublet start',
+    '  sublet start --simulation --gpu "RTX 4060" --vram 8188',
+    '  sublet host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
+    '  sublet jobs',
   ].join('\n');
 }

@@ -307,8 +307,8 @@ export class Agent extends EventEmitter {
 
   async run(): Promise<void> {
     const cfg = this.options.config;
-    if (!cfg.token) throw new Error('No host key saved. Run: kiln login');
-    this.logger.info(`Starting Kiln agent v${VERSION}`, { server: cfg.server, simulate: this.options.simulation });
+    if (!cfg.token) throw new Error('No host key saved. Run: sublet login');
+    this.logger.info(`Starting Sublet agent v${VERSION}`, { server: cfg.server, simulate: this.options.simulation });
     if (!this.options.simulation) {
       this.gpu = await this.gpuMonitor.scan(true);
       for (const warning of this.gpu.warnings) this.logger.warn(warning);
@@ -346,7 +346,7 @@ export class Agent extends EventEmitter {
       } else if (state === 'reconnecting') {
         this.dashboard.update({ status: 'reconnecting', message: 'Tunnel dropped; keeping llama-server warm' });
       } else if (state === 'auth-failed') {
-        this.dashboard.update({ status: 'auth-failed', message: 'Host key rejected. Run kiln login again.' });
+        this.dashboard.update({ status: 'auth-failed', message: 'Host key rejected. Run sublet login again.' });
       }
     });
     this.tunnel.on('outdated', (error: Error) => { this.fail(error, 'outdated'); });
@@ -415,7 +415,7 @@ export class Agent extends EventEmitter {
 
   private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null }): Promise<AgentModel> {
     if (this.options.simulation) {
-      const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'kiln-simulator.gguf';
+      const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublet-simulator.gguf';
       const paramB = paramBFromName(file) || 7;
       const quant = quantFromName(file) || 'Q4_K_M';
       return {
@@ -558,8 +558,8 @@ export class Agent extends EventEmitter {
       gpuVendor: gpu?.vendor || 'unknown',
       vramMb: gpu?.totalVramMb || this.options.gpuOverride?.vramMb || 0,
       freeVramMb: gpu?.freeVramMb || 0,
-      modelId: model?.modelId || (this.options.publicMode ? 'kiln-public' : 'kiln-standby'),
-      modelLabel: model?.label || (this.options.publicMode ? 'Kiln public host' : 'Standby'),
+      modelId: model?.modelId || (this.options.publicMode ? 'sublet-public' : 'sublet-standby'),
+      modelLabel: model?.label || (this.options.publicMode ? 'Sublet public host' : 'Standby'),
       repo: model?.repo || '',
       file: model?.file || '',
       quant: model?.quant || 'Q4_K_M',
@@ -770,7 +770,7 @@ export class Agent extends EventEmitter {
           messages: message.messages as ChatMessage[],
           maxTokens: Number(message.maxTokens || 256),
           temperature: Number(message.temperature ?? 0.7),
-          model: this.model?.modelId || 'kiln-simulator',
+          model: this.model?.modelId || 'sublet-simulator',
         }, {
           signal: controller.signal,
           tokPerSec: this.options.tokPerSec || 24,

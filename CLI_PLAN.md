@@ -3,7 +3,7 @@
 > **Why Keep the CLI Separate?**
 > Mixing the Website/Server code and the Host Terminal Agent into one project is messy because they run on completely different machines:
 > * **Your Central Server** runs in the cloud (manages the website, database, wallets, and API routing).
-> * **The Terminal Agent CLI** runs on the **GPU Host's PC / Mini-Datacenter** (downloaded via `npx [brand]` to control their GPU, `llama.cpp`, and model files).
+> * **The Terminal Agent CLI** runs on the **GPU Host's PC / Mini-Datacenter** (downloaded via `npx sublet-cli` to control their GPU, `llama.cpp`, and model files).
 >
 > Keeping the CLI as its own clean, standalone package makes it easy to publish to `npm`, easy to update, and rock-solid for 8-hour overnight jobs.
 
@@ -12,12 +12,12 @@
 ## 1. Folder Structure for the Standalone CLI (`agent-cli/`)
 
 ```text
-c:\importantr\sellingai\agent-cli\
-├── package.json              # Configured with "bin" so `npx [brand]` works out of the box
+agent-cli/
+├── package.json              # Configured with "bin" so `npx sublet-cli` works out of the box
 ├── tsconfig.json
 └── src/
     ├── index.ts              # CLI entry point (parses commands: login, start, host, jobs, doctor)
-    ├── config.ts             # Manages ~/.[brand]/config.json (saved Host Key, cache paths)
+    ├── config.ts             # Manages ~/.sublet/config.json (saved Host Key, cache paths)
     ├── hardware/
     │   ├── gpuMonitor.ts     # Runs nvidia-smi / GPU checks (VRAM, temp, wattage, load %)
     │   └── sleepGuard.ts     # Prevents Windows/Linux/Mac from sleeping during 8-hour jobs
@@ -32,10 +32,10 @@ c:\importantr\sellingai\agent-cli\
         └── terminalDashboard.ts # Clean live terminal display (earnings ticker, timer, GPU stats)
 ```
 
-All files downloaded on the Host's PC stay neatly inside one folder (`~/.[brand]/`):
-* `~/.[brand]/config.json` — Host authentication key & settings
-* `~/.[brand]/bin/` — The `llama-server` executable & CUDA/Vulkan DLLs
-* `~/.[brand]/models/` — Cached HuggingFace `.gguf` models (so hosts never download the same model twice)
+All files downloaded on the Host's PC stay neatly inside one folder (`~/.sublet/`):
+* `~/.sublet/config.json` — Host authentication key & settings
+* `~/.sublet/bin/` — The `llama-server` executable & CUDA/Vulkan DLLs
+* `~/.sublet/models/` — Cached HuggingFace `.gguf` models (so hosts never download the same model twice)
 
 ---
 
@@ -43,11 +43,11 @@ All files downloaded on the Host's PC stay neatly inside one folder (`~/.[brand]
 
 | Command | What It Does |
 | :--- | :--- |
-| `npx [brand] login` | Asks for the Host's token from your website, verifies it, and saves it locally. |
-| `npx [brand] doctor` | Scans the machine: prints GPU model, Total/Free VRAM, OS, internet speed, and downloads `llama-server` if missing. |
-| `npx [brand] start` | **Main Mode (Web-Synced Standby):** Connects to your website and waits. When the host clicks **"Run Request"** on your website (e.g., an 8-hour overnight job), this terminal automatically downloads the `.gguf` and starts running it! |
-| `npx [brand] jobs` | Lets mini-datacenter / Linux SSH hosts browse and accept 8-hour Buyer Requests **directly inside the terminal** without needing a browser. |
-| `npx [brand] host <hf-url> --price 0.25` | Starts **Public Pay-Per-Token Mode** directly from the terminal with a chosen `.gguf` model and price per 1M tokens. |
+| `npx sublet-cli login` | Asks for the Host's token from your website, verifies it, and saves it locally. |
+| `npx sublet-cli doctor` | Scans the machine: prints GPU model, Total/Free VRAM, OS, internet speed, and downloads `llama-server` if missing. |
+| `npx sublet-cli start` | **Main Mode (Web-Synced Standby):** Connects to your website and waits. When the host clicks **"Run Request"** on your website (e.g., an 8-hour overnight job), this terminal automatically downloads the `.gguf` and starts running it! |
+| `npx sublet-cli jobs` | Lets mini-datacenter / Linux SSH hosts browse and accept 8-hour Buyer Requests **directly inside the terminal** without needing a browser. |
+| `npx sublet-cli host <hf-url> --price 0.25` | Starts **Public Pay-Per-Token Mode** directly from the terminal with a chosen `.gguf` model and price per 1M tokens. |
 
 ---
 
@@ -67,7 +67,7 @@ All files downloaded on the Host's PC stay neatly inside one folder (`~/.[brand]
 
 ### Module 3: Automatic `llama.cpp` Engine Installer (`binaryManager.ts`)
 * Normal GPU owners don't know how to compile `llama.cpp` or install CUDA toolkits.
-* On first run, the CLI checks the host's GPU type and automatically downloads the matching pre-compiled `llama-server` release binary into `~/.[brand]/bin/`:
+* On first run, the CLI checks the host's GPU type and automatically downloads the matching pre-compiled `llama-server` release binary into `~/.sublet/bin/`:
   * **NVIDIA GPU:** CUDA build
   * **AMD / Intel GPU:** Vulkan build
   * **Apple Silicon (M1/M2/M3/M4):** Metal build
@@ -82,7 +82,7 @@ All files downloaded on the Host's PC stay neatly inside one folder (`~/.[brand]
 * Spawns `llama-server` as an invisible child process bound strictly to `127.0.0.1:<random_port>` with locked security & performance flags:
   ```bash
   llama-server \
-    --model ~/.[brand]/models/model.gguf \
+    --model ~/.sublet/models/model.gguf \
     --host 127.0.0.1 \
     --port <random_free_port> \
     --n-gpu-layers 999 \       # Forces 100% GPU VRAM execution (prevents slow CPU offloading)
@@ -110,7 +110,7 @@ Instead of ugly scrolling logs, the CLI prints a clean, live-updating terminal b
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ⚡ [BRAND] GPU TERMINAL AGENT v1.0.0               STATUS: ● ONLINE │
+│  ⚡ SUBLET GPU TERMINAL AGENT v1.0.0               STATUS: ● ONLINE │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Host Endpoint : https://alex.[webname].com/api/v1                   │
 │  Reliability   : 98.5% (SAFE — Auto-ban threshold: < 90.0%)          │

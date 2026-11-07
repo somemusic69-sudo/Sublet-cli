@@ -40,7 +40,7 @@ export type LlamaProps = {
 export function buildLlamaArgs(options: Pick<LlamaRunnerOptions, 'modelPath' | 'context' | 'slots' | 'host' | 'port' | 'gpuLayers' | 'extraArgs'>): string[] {
   const slots = Math.max(1, Math.round(options.slots ?? 1));
   // llama-server treats --ctx-size as the total KV cache and divides it across
-  // parallel slots. Kiln advertises the per-slot context, so allocate slots * ctx.
+  // parallel slots. Sublet advertises the per-slot context, so allocate slots * ctx.
   const totalContext = Math.max(256, Math.round(options.context)) * slots;
   const args = [
     '-m', options.modelPath,

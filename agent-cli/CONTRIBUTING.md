@@ -1,4 +1,4 @@
-# Contributing to Kiln Agent
+# Contributing to Sublet CLI
 
 Thanks for helping make peer-to-peer GPU hosting less fragile.
 
@@ -13,7 +13,7 @@ npm run build
 node dist/index.js --help
 ```
 
-End-to-end checks need the central Kiln server:
+End-to-end checks need the central Sublet server:
 
 ```bash
 # from the server checkout
