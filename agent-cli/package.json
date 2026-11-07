@@ -1,0 +1,63 @@
+{
+  "name": "kiln-agent",
+  "version": "1.0.0",
+  "description": "Kiln GPU host terminal agent: run llama.cpp, serve metered tokens, and survive overnight bookings.",
+  "author": "Kiln contributors",
+  "homepage": "https://github.com/somemusic69-sudo/kiln#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/somemusic69-sudo/kiln.git",
+    "directory": "agent-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/somemusic69-sudo/kiln/issues"
+  },
+  "type": "module",
+  "bin": {
+    "kiln": "dist/index.js",
+    "kiln-agent": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "kiln",
+    "gpu",
+    "llama.cpp",
+    "gguf",
+    "openai",
+    "npx"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "e2e": "node scripts/e2e.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "tar": "^7.4.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^22.15.0",
+    "@types/tar": "^6.1.13",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

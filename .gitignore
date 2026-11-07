@@ -1,0 +1,12 @@
+# Root ignores
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+
+# Agent runtime data
+agent-cli/data/
+agent-cli/*.tgz
+.kiln/

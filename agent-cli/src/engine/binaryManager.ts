@@ -1,0 +1,486 @@
+import { createWriteStream } from 'node:fs';
+import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import AdmZip from 'adm-zip';
+import * as tar from 'tar';
+import { binDir, cacheDir } from '../config.js';
+import { pathExists, safeJoin, sha256File } from '../util/fs.js';
+import { fetchJson, type HttpError } from '../util/http.js';
+import { which } from '../util/exec.js';
+import { ProgressBar } from '../ui/progress.js';
+import type { Logger } from '../logger.js';
+import type { GpuSnapshot, GpuVendor } from '../hardware/types.js';
+
+export type LlamaVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';
+
+export type LlamaInstall = {
+  path: string;
+  version: string;
+  variant: LlamaVariant;
+  sha256: string | null;
+  binarySha256?: string | null;
+  verified: boolean;
+  source: 'env' | 'path' | 'manifest' | 'download';
+  dir?: string;
+};
+
+export type ReleaseAsset = {
+  name: string;
+  browser_download_url: string;
+  size?: number;
+  digest?: string | null;
+};
+
+export type ReleaseInfo = {
+  tag_name: string;
+  name?: string;
+  published_at?: string;
+  assets: ReleaseAsset[];
+};
+
+export type InstallOptions = {
+  platform?: NodeJS.Platform;
+  arch?: string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  gpu?: GpuSnapshot | null;
+  logger?: Logger;
+  fetchImpl?: typeof fetch;
+  showProgress?: boolean;
+  stream?: NodeJS.WriteStream;
+  requireChecksum?: boolean;
+  release?: ReleaseInfo;
+  version?: string;
+};
+
+export type EnsureResult =
+  | { found: true; install: LlamaInstall }
+  | { found: false; reason: string; install?: undefined };
+
+type Manifest = {
+  installs: LlamaInstall[];
+  latest?: string;
+};
+
+const RELEASE_CACHE_MS = 6 * 60 * 60 * 1000;
+const RELEASE_URL = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest';
+const RELEASE_LIST_URL = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20';
+const RELEASE_URL_FALLBACK = 'https://api.github.com/repos/ggerganov/llama.cpp/releases/latest';
+
+export function variantFor(platform: NodeJS.Platform, arch: string, vendor: GpuVendor | null | undefined): LlamaVariant {
+  if (platform === 'darwin') return arch === 'arm64' ? 'metal' : 'cpu';
+  if (vendor === 'nvidia') return 'cuda';
+  if (vendor === 'amd' || vendor === 'intel') return 'vulkan';
+  return 'cpu';
+}
+
+function patternsFor(platform: NodeJS.Platform, arch: string, variant: LlamaVariant): RegExp[] {
+  if (platform === 'win32') {
+    if (variant === 'cuda') return [/bin-win-cuda.*x64\.zip$/i, /win-cuda.*x64\.zip$/i, /win-cuda.*\.zip$/i];
+    if (variant === 'vulkan') return [/bin-win-vulkan.*x64\.zip$/i, /win-vulkan.*x64\.zip$/i];
+    return [/bin-win-cpu.*x64\.zip$/i, /win-cpu.*x64\.zip$/i];
+  }
+  if (platform === 'darwin') {
+    return arch === 'arm64'
+      ? [/macos-arm64\.(zip|tar\.gz)$/i, /bin-macos-arm64\.(zip|tar\.gz)$/i, /macos.*arm64.*\.(zip|tar\.gz)$/i]
+      : [/macos-x64\.(zip|tar\.gz)$/i, /bin-macos-x64\.(zip|tar\.gz)$/i];
+  }
+  if (variant === 'vulkan') return [/ubuntu-vulkan.*x64\.(zip|tar\.gz)$/i, /linux-vulkan.*x64\.(zip|tar\.gz)$/i];
+  if (variant === 'cuda') return [/ubuntu-cuda.*x64\.(zip|tar\.gz)$/i, /linux-cuda.*x64\.(zip|tar\.gz)$/i, /ubuntu.*x64\.(zip|tar\.gz)$/i];
+  return [/ubuntu-x64\.(zip|tar\.gz)$/i, /ubuntu.*x64\.(zip|tar\.gz)$/i, /linux.*x64\.(zip|tar\.gz)$/i];
+}
+
+export function pickReleaseAsset(release: ReleaseInfo, platform: NodeJS.Platform, arch: string, variant: LlamaVariant): { main: ReleaseAsset | null; companions: ReleaseAsset[] } {
+  const assets = release.assets.filter((a) => !/\.sha256(\.txt)?$/i.test(a.name) && !/^cudart/i.test(a.name));
+  let main: ReleaseAsset | null = null;
+  for (const pattern of patternsFor(platform, arch, variant)) {
+    const found = assets.find((a) => pattern.test(a.name));
+    if (found) { main = found; break; }
+  }
+  if (!main && variant !== 'cpu') {
+    // A CPU build is a safe fallback on a machine without the expected runtime.
+    const patterns = patternsFor(platform, arch, 'cpu');
+    for (const pattern of patterns) {
+      const found = assets.find((a) => pattern.test(a.name));
+      if (found) { main = found; break; }
+    }
+  }
+  const cudaVersion = main?.name.match(/cuda-([\d.]+)-x64/i)?.[1] || null;
+  const companions = variant === 'cuda'
+    ? release.assets.filter((a) => {
+      if (!/^cudart/i.test(a.name) || /\.sha256/i.test(a.name)) return false;
+      if (!/(x64|x86_64)/i.test(a.name)) return false;
+      if (platform === 'win32' && !/win/i.test(a.name)) return false;
+      if (platform === 'linux' && !/(ubuntu|linux)/i.test(a.name)) return false;
+      if (platform === 'darwin') return false;
+      if (cudaVersion && !a.name.includes(cudaVersion)) return false;
+      return true;
+    })
+    : [];
+  return { main, companions };
+}
+
+function releaseCachePath(env: NodeJS.ProcessEnv, key = 'default'): string {
+  return join(cacheDir(env), `llama-release-${key}.json`);
+}
+
+async function readReleaseCache(env: NodeJS.ProcessEnv, key: string): Promise<ReleaseInfo | null> {
+  try {
+    const raw = await readFile(releaseCachePath(env, key), 'utf8');
+    const data = JSON.parse(raw) as { fetchedAt: number; release: ReleaseInfo };
+    if (!data || Date.now() - data.fetchedAt > RELEASE_CACHE_MS || !data.release?.assets?.length) return null;
+    return data.release;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, arch: string, variant: LlamaVariant): Promise<ReleaseInfo> {
+  if (options.release) return options.release;
+  const env = options.env ?? process.env;
+  const cacheKey = `${platform}-${arch}-${variant}`;
+  const cached = await readReleaseCache(env, cacheKey);
+  if (cached && pickReleaseAsset(cached, platform, arch, variant).main) return cached;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const headers = { 'user-agent': 'kiln-agent/1.0', accept: 'application/vnd.github+json' };
+  const parse = async (response: Response): Promise<ReleaseInfo | null> => {
+    if (!response.ok) return null;
+    const data = await response.json() as ReleaseInfo | ReleaseInfo[];
+    const list = Array.isArray(data) ? data : [data];
+    return list.find((release) => release?.tag_name && Array.isArray(release.assets) && release.assets.length > 0 && pickReleaseAsset(release, platform, arch, variant).main) || null;
+  };
+  let release: ReleaseInfo | null = null;
+  for (const url of [RELEASE_URL, RELEASE_LIST_URL, RELEASE_URL_FALLBACK]) {
+    try {
+      release = await parse(await fetchImpl(url, { headers, signal: AbortSignal.timeout(20_000) }));
+      if (release) break;
+    } catch {
+      /* try the next endpoint */
+    }
+  }
+  if (!release) throw new Error(`No llama.cpp release with a ${variant} build was found for ${platform}/${arch}`);
+  await mkdir(cacheDir(env), { recursive: true });
+  await writeFile(releaseCachePath(env, cacheKey), JSON.stringify({ fetchedAt: Date.now(), release }), 'utf8');
+  return release;
+}
+
+async function checksumFor(asset: ReleaseAsset, release: ReleaseInfo, options: InstallOptions): Promise<{ expected: string | null; published: boolean }> {
+  const env = options.env ?? process.env;
+  const override = env.KILN_LLAMA_SHA256;
+  if (override && /^[a-f0-9]{64}$/i.test(override.trim())) return { expected: override.trim().toLowerCase(), published: true };
+  if (asset.digest && /^sha256:[a-f0-9]{64}$/i.test(asset.digest)) return { expected: asset.digest.slice(7).toLowerCase(), published: true };
+  const sidecar = release.assets.find((a) => new RegExp(`^${escapeRegExp(asset.name)}\\.sha256(?:\\.txt)?$`, 'i').test(a.name));
+  if (sidecar) {
+    try {
+      const fetchImpl = options.fetchImpl ?? fetch;
+      const response = await fetchImpl(sidecar.browser_download_url, { headers: { 'user-agent': 'kiln-agent/1.0' }, signal: AbortSignal.timeout(20_000) });
+      const text = await response.text();
+      const match = text.match(/\b([a-f0-9]{64})\b/i);
+      if (match?.[1]) return { expected: match[1].toLowerCase(), published: true };
+    } catch {
+      /* no published digest */
+    }
+  }
+  return { expected: null, published: false };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function downloadFile(url: string, dest: string, options: InstallOptions & { label: string }): Promise<string> {
+  await mkdir(dirname(dest), { recursive: true });
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const bar = options.showProgress === false ? null : new ProgressBar({
+    label: options.label,
+    total: 0,
+    enabled: options.showProgress ?? Boolean((options.stream ?? process.stderr).isTTY),
+    stream: options.stream ?? process.stderr,
+  });
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetchImpl(url, { redirect: 'follow', headers: { 'user-agent': 'kiln-agent/1.0' }, signal: AbortSignal.timeout(30 * 60_000) });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      const total = Number(response.headers.get('content-length') || 0) || null;
+      if (total) bar?.setTotal(total);
+      const writer = createWriteStream(dest, { flags: 'w' });
+      let received = 0;
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value?.length) {
+            if (!writer.write(Buffer.from(value))) {
+              await new Promise<void>((resolve, reject) => {
+                const onDrain = () => { cleanup(); resolve(); };
+                const onError = (error: Error) => { cleanup(); reject(error); };
+                const cleanup = () => {
+                  writer.off('drain', onDrain);
+                  writer.off('error', onError);
+                };
+                writer.once('drain', onDrain);
+                writer.once('error', onError);
+              });
+            }
+            received += value.length;
+            bar?.set(received, total ?? undefined);
+          }
+        }
+        await new Promise<void>((resolve, reject) => writer.end((error?: Error | null) => error ? reject(error) : resolve()));
+      } catch (error) {
+        writer.destroy();
+        throw error;
+      }
+      bar?.done();
+      return dest;
+    } catch (error) {
+      lastError = error;
+      bar?.fail();
+      await rm(dest, { force: true });
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 750 * attempt));
+    }
+  }
+  throw new Error(`Could not download ${basename(url)}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+async function extractArchive(archive: string, destination: string): Promise<void> {
+  await mkdir(destination, { recursive: true });
+  const lower = archive.toLowerCase();
+  if (lower.endsWith('.zip')) {
+    const zip = new AdmZip(archive);
+    const entries = zip.getEntries();
+    if (entries.length > 10_000) throw new Error('Archive has too many entries');
+    let uncompressed = 0;
+    for (const entry of entries) {
+      uncompressed += Number(entry.header.size || 0);
+      if (uncompressed > 4 * 1024 * 1024 * 1024) throw new Error('Archive expands beyond the 4GB safety limit');
+      if (entry.isDirectory) {
+        await mkdir(safeJoin(destination, entry.entryName), { recursive: true });
+        continue;
+      }
+      const target = safeJoin(destination, entry.entryName);
+      await mkdir(join(target, '..'), { recursive: true });
+      const data = entry.getData();
+      await writeFile(target, data);
+      if (/[\\/](llama-server|server)(\.exe)?$/i.test(target)) {
+        await chmod(target, 0o755).catch(() => undefined);
+      }
+    }
+    return;
+  }
+  if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+    await tar.x({
+      file: archive,
+      cwd: destination,
+      strict: true,
+      filter: (path) => {
+        safeJoin(destination, path);
+        return true;
+      },
+    });
+    return;
+  }
+  throw new Error(`Unsupported archive type: ${basename(archive)}`);
+}
+
+async function locateServerBinary(dir: string): Promise<string | null> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isFile() && /^(llama-server|server)(\.exe)?$/i.test(entry.name)) return full;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = await locateServerBinary(join(dir, entry.name));
+    if (found) return found;
+  }
+  return null;
+}
+
+function manifestPath(env: NodeJS.ProcessEnv): string {
+  return join(binDir(env), 'manifest.json');
+}
+
+async function readManifest(env: NodeJS.ProcessEnv): Promise<Manifest> {
+  try {
+    const data = JSON.parse(await readFile(manifestPath(env), 'utf8')) as Manifest;
+    return { installs: Array.isArray(data.installs) ? data.installs : [], latest: data.latest };
+  } catch {
+    return { installs: [] };
+  }
+}
+
+async function writeManifest(env: NodeJS.ProcessEnv, manifest: Manifest): Promise<void> {
+  await mkdir(binDir(env), { recursive: true });
+  await writeFile(manifestPath(env), JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+export async function findExistingLlama(options: InstallOptions = {}): Promise<LlamaInstall | null> {
+  const env = options.env ?? process.env;
+  const explicit = env.LLAMA_SERVER;
+  if (explicit && await pathExists(explicit)) {
+    return { path: explicit, version: 'env', variant: 'cpu', sha256: null, verified: false, source: 'env' };
+  }
+  const manifest = await readManifest(env);
+  if (manifest.latest) {
+    const install = manifest.installs.find((i) => i.path === manifest.latest);
+    if (install && await pathExists(install.path)) {
+      if (install.binarySha256) {
+        const actual = await sha256File(install.path);
+        if (actual !== install.binarySha256) return null;
+      }
+      return { ...install, source: 'manifest' };
+    }
+  }
+  const fromPath = await which('llama-server');
+  if (fromPath) return { path: fromPath, version: 'path', variant: 'cpu', sha256: null, verified: false, source: 'path' };
+  return null;
+}
+
+export async function ensureLlamaServer(options: InstallOptions & { fix?: boolean; simulation?: boolean } = {}): Promise<EnsureResult> {
+  if (options.simulation) return { found: false, reason: 'Simulation mode: llama-server is not needed.' };
+  const existing = await findExistingLlama(options);
+  if (existing) return { found: true, install: existing };
+  if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: kiln doctor --fix' };
+  try {
+    const install = await installLlamaServer(options);
+    return { found: true, install };
+  } catch (error) {
+    return { found: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function installLlamaServer(options: InstallOptions = {}): Promise<LlamaInstall> {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const vendor = options.gpu?.primary?.vendor;
+  const variant = variantFor(platform, arch, vendor);
+  const release = await fetchRelease(options, platform, arch, variant);
+  const picked = pickReleaseAsset(release, platform, arch, variant);
+  if (!picked.main) {
+    throw new Error(`No llama.cpp release asset found for ${platform}/${arch} (${variant}) in ${release.tag_name}`);
+  }
+  const version = (options.version || release.tag_name || 'latest').replace(/[^\w.-]+/g, '-');
+  const installDir = join(binDir(env), `llama-${version}-${variant}`);
+  const existingBinary = await locateServerBinary(installDir).catch(() => null);
+  if (existingBinary) {
+    const manifest = await readManifest(env);
+    const known = manifest.installs.find((i) => i.path === existingBinary);
+    if (known) {
+      manifest.latest = existingBinary;
+      await writeManifest(env, manifest);
+      return { ...known, source: 'manifest' };
+    }
+    const install: LlamaInstall = { path: existingBinary, version, variant, sha256: null, verified: false, source: 'download', dir: installDir };
+    manifest.installs.push(install);
+    manifest.latest = existingBinary;
+    await writeManifest(env, manifest);
+    return install;
+  }
+
+  const work = join(cacheDir(env), `install-${Date.now()}`);
+  const archiveDir = join(work, 'archives');
+  const extractDir = join(work, 'extract');
+  await mkdir(archiveDir, { recursive: true });
+  await mkdir(extractDir, { recursive: true });
+  try {
+    const assets = [picked.main, ...picked.companions];
+    let mainSha: string | null = null;
+    let anyVerified = true;
+    for (const [index, asset] of assets.entries()) {
+      const archive = join(archiveDir, asset.name);
+      await downloadFile(asset.browser_download_url, archive, {
+        ...options,
+        label: `Downloading ${asset.name}`,
+      });
+      const actual = await sha256File(archive);
+      const check = await checksumFor(asset, release, options);
+      if (check.expected && check.expected !== actual) {
+        throw new Error(`Checksum mismatch for ${asset.name}. Expected ${check.expected}, got ${actual}.`);
+      }
+      if (!check.published) {
+        if (options.requireChecksum) {
+          throw new Error(`No published SHA-256 for ${asset.name}; refusing because --require-checksum is set.`);
+        }
+        anyVerified = false;
+        options.logger?.warn(`No published SHA-256 for ${asset.name}; recorded the local hash.`);
+      }
+      if (index === 0) mainSha = actual;
+      await extractArchive(archive, extractDir);
+    }
+    const binary = await locateServerBinary(extractDir);
+    if (!binary) throw new Error('No llama-server binary found inside the release archive');
+    await rm(installDir, { recursive: true, force: true });
+    await mkdir(installDir, { recursive: true });
+    const entries = await readdir(extractDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const source = join(extractDir, entry.name);
+      const target = join(installDir, entry.name);
+      if (entry.isDirectory()) {
+        await copyDir(source, target);
+      } else {
+        await copyFile(source, target);
+        if (/^(llama-server|server)(\.exe)?$/i.test(entry.name)) await chmod(target, 0o755).catch(() => undefined);
+      }
+    }
+    const installedBinary = await locateServerBinary(installDir);
+    if (!installedBinary) throw new Error('llama-server was extracted but could not be found');
+    await chmod(installedBinary, 0o755).catch(() => undefined);
+    const binarySha256 = await sha256File(installedBinary);
+    const install: LlamaInstall = {
+      path: installedBinary,
+      version,
+      variant,
+      sha256: mainSha,
+      binarySha256,
+      verified: anyVerified,
+      source: 'download',
+      dir: installDir,
+    };
+    const manifest = await readManifest(env);
+    manifest.installs = manifest.installs.filter((i) => i.path !== installedBinary);
+    manifest.installs.push(install);
+    manifest.latest = installedBinary;
+    await writeManifest(env, manifest);
+    return install;
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function copyDir(source: string, target: string): Promise<void> {
+  await mkdir(target, { recursive: true });
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) await copyDir(from, to);
+    else await copyFile(from, to);
+  }
+}
+
+export async function binaryStatus(options: InstallOptions = {}): Promise<{ install: LlamaInstall | null; manifestPath: string }> {
+  return { install: await findExistingLlama(options), manifestPath: manifestPath(options.env ?? process.env) };
+}
+
+export async function verifyInstalledBinary(install: LlamaInstall): Promise<boolean> {
+  if (!install.binarySha256) return false;
+  const actual = await sha256File(install.path);
+  return actual === install.binarySha256;
+}
+
+export function isHttpError(error: unknown): error is HttpError {
+  return Boolean(error && typeof error === 'object' && 'status' in error);
+}
+
+export async function readReleaseForTest(): Promise<ReleaseInfo> {
+  const response = await fetchJson<ReleaseInfo>(RELEASE_URL, { headers: { accept: 'application/vnd.github+json' } });
+  return response;
+}
+
+void rename;
+void stat;
+void ensureDirUnused;
+function ensureDirUnused() { /* keeps import shape stable for older Node typings */ }
