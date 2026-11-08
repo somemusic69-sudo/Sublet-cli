@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { maskToken, normalizeServer, wsUrl } from '../src/config.js';
+import { hostEndpoint, maskToken, normalizeServer, wsUrl } from '../src/config.js';
+import { canOpenBrowser } from '../src/util/open.js';
 import { parseArgv } from '../src/index.js';
 
 test('server URLs are normalized and websocket URLs keep the token', () => {
@@ -53,4 +54,23 @@ test('argv parser rejects empty, negative, fractional and swallowed values and u
   assert.equal(parseArgv(['start', '-h']).flags.help, true);
   assert.equal(parseArgv(['-v']).flags.version, true);
   assert.deepEqual(parseArgv(['host', '--', '-odd.gguf']).flags.positionals, ['-odd.gguf']);
+});
+
+test('the host endpoint is a path on the server, the same route the server serves', () => {
+  assert.equal(hostEndpoint('https://sublet.example.com/', 'ada'), 'https://sublet.example.com/h/ada/v1');
+  assert.equal(hostEndpoint('http://127.0.0.1:8787', null), 'http://127.0.0.1:8787/h/USERNAME/v1');
+});
+
+test('login opens a browser only in a local desktop session', () => {
+  assert.equal(parseArgv(['login', '--no-browser']).flags.noBrowser, true);
+  assert.equal(canOpenBrowser({ SSH_CONNECTION: '1 2 3 4' }, 'darwin'), false);
+  assert.equal(canOpenBrowser({}, 'linux'), false);
+  assert.equal(canOpenBrowser({ DISPLAY: ':0' }, 'linux'), true);
+  assert.equal(canOpenBrowser({}, 'win32'), true);
+});
+
+test('start takes the request code as its argument', () => {
+  const parsed = parseArgv(['start', 'r_abc123', '--simulation']);
+  assert.equal(parsed.command, 'start');
+  assert.deepEqual(parsed.flags.positionals, ['r_abc123']);
 });

@@ -1,12 +1,13 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { readdir, stat } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { Agent } from './agent.js';
 import { apiUrl, configPath, subletHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
 import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION, compareVersions } from './version.js';
 import type { Logger } from './logger.js';
-import { GpuMonitor, checkFit } from './hardware/gpuMonitor.js';
+import { GpuMonitor, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
 import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
 import { ensureLlamaServer, findExistingLlama, variantFor } from './engine/binaryManager.js';
@@ -14,6 +15,7 @@ import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
 import { execFile, sleep, toError } from './util/exec.js';
+import { canOpenBrowser, openUrl } from './util/open.js';
 import { formatBytes, formatBytesPerSec, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
 import type { AgentMe, AgentRequest } from './types.js';
 
@@ -44,11 +46,16 @@ export type GlobalFlags = {
   watch: boolean;
   timeoutMs?: number;
   requireChecksum: boolean;
+  noBrowser: boolean;
   positionals: string[];
 };
 
 function serverFor(flags: GlobalFlags, fallback?: string): string {
   return normalizeServer(flags.server || process.env.SUBLET_SERVER || fallback || DEFAULT_SERVER);
+}
+
+function gpuOverrideFrom(flags: GlobalFlags): GpuOverride | null {
+  return flags.gpu || flags.vram ? { name: flags.gpu ?? null, vramMb: flags.vram ?? null } : null;
 }
 
 async function resolvedConfig(flags: GlobalFlags, requireToken: boolean): Promise<AgentConfig> {
@@ -86,10 +93,61 @@ export async function verifyHostKey(server: string, token: string): Promise<Agen
   }
 }
 
+export type DeviceLoginCode = {
+  deviceCode: string;
+  userCode: string;
+  verificationUrl: string;
+  verificationUrlComplete?: string;
+  expiresAt: number;
+  intervalMs?: number;
+};
+
+/**
+ * Links this computer to a web account: the server gives a short code, the person approves it on the
+ * website, and the CLI receives its own host key. Returns null when the server has no device login.
+ */
+export async function deviceLogin(server: string, options: { name: string; onCode: (code: DeviceLoginCode) => void }): Promise<{ token: string; username: string } | null> {
+  let code: DeviceLoginCode;
+  try {
+    code = await fetchJson<DeviceLoginCode>(apiUrl(server, '/api/cli/login'), { body: JSON.stringify({ name: options.name }), timeoutMs: 15_000 });
+  } catch (error) {
+    if (error instanceof HttpError && (error.status === 404 || error.status === 405)) return null;
+    throw error;
+  }
+  options.onCode(code);
+  const interval = Math.min(Math.max(code.intervalMs ?? 2_000, 10), 10_000);
+  while (Date.now() < code.expiresAt) {
+    await sleep(interval);
+    const poll = await fetchJson<{ status: string; token?: string; username?: string }>(apiUrl(server, '/api/cli/login/poll'), {
+      body: JSON.stringify({ deviceCode: code.deviceCode }),
+      timeoutMs: 15_000,
+    });
+    if (poll.status === 'approved' && poll.token) return { token: poll.token, username: poll.username || '' };
+  }
+  throw new Error('The login code expired. Run sublet login again.');
+}
+
+function announceLoginCode(code: DeviceLoginCode, flags: GlobalFlags): void {
+  const link = code.verificationUrlComplete || code.verificationUrl;
+  if (flags.json) {
+    output.write(`${JSON.stringify({ event: 'code', userCode: code.userCode, verificationUrl: link, expiresAt: code.expiresAt })}\n`);
+    return;
+  }
+  output.write(`\nLink this computer to your ${BRAND} account:\n`);
+  output.write(`  1. Open  ${link}\n`);
+  output.write(`  2. Check that the page shows the code ${code.userCode}, then click Connect.\n\n`);
+  output.write(`Waiting for you to connect... (Ctrl+C to stop)\n`);
+  if (!flags.noBrowser && process.stdout.isTTY && canOpenBrowser()) openUrl(link);
+}
+
 export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<number> {
   const existing = await readConfigFile();
   const server = serverFor(flags, existing?.server);
-  const token = (flags.token || flags.positionals[0] || await promptToken()).trim();
+  let token = (flags.token || flags.positionals[0] || '').trim();
+  if (!token) {
+    const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
+    token = linked?.token ?? (await promptToken()).trim();
+  }
   if (!token) throw new Error('Host key is empty');
   const me = await verifyHostKey(server, token);
   const cfg: AgentConfig = {
@@ -225,8 +283,12 @@ async function listModels(): Promise<{ count: number; bytes: number }> {
 }
 
 export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<number> {
+  const requestId = flags.positionals[0] ?? null;
+  if (requestId && !/^[A-Za-z0-9_-]{3,80}$/.test(requestId)) throw new Error(`"${requestId}" is not a request code. Copy the start command from the website.`);
   const cfg = await resolvedConfig(flags, true);
+  if (requestId) logger.info(`Serving request ${requestId}. The agent stops when the booking ends.`);
   const agent = new Agent({
+    requestId,
     config: cfg,
     logger,
     simulation: flags.simulation,
@@ -237,13 +299,13 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
     priceOutUsd: flags.priceOut ?? null,
     context: flags.context,
     slots: flags.slots,
-    gpuOverride: flags.gpu ? { name: flags.gpu, vramMb: flags.vram || 24576 } : null,
+    gpuOverride: gpuOverrideFrom(flags),
     tokPerSec: flags.tokPerSec ?? null,
     autoInstall: !flags.noInstall,
     json: flags.json,
     once: flags.once,
   });
-  return await runAgent(agent, logger);
+  return await runAgent(agent, logger, requestId);
 }
 
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
@@ -284,7 +346,7 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
     priceOutUsd: flags.priceOut ?? flags.price ?? 0.25,
     context: flags.context,
     slots: flags.slots,
-    gpuOverride: flags.gpu ? { name: flags.gpu, vramMb: flags.vram || 24576 } : null,
+    gpuOverride: gpuOverrideFrom(flags),
     tokPerSec: flags.tokPerSec ?? null,
     autoInstall: !flags.noInstall,
     json: flags.json,
@@ -293,9 +355,13 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
   return await runAgent(agent, logger);
 }
 
-async function runAgent(agent: Agent, logger: Logger): Promise<number> {
+type RejectedEvent = { requestId: string; reason: string; wasActive: boolean };
+
+/** With a target request (`sublet start <code>`), the agent exits when that request ends. */
+async function runAgent(agent: Agent, logger: Logger, target: string | null = null): Promise<number> {
   let stopping = false;
   let exitCode = 0;
+  let served = false;
   const stop = async (code: number, preserveState = false) => {
     if (stopping) return;
     stopping = true;
@@ -308,9 +374,29 @@ async function runAgent(agent: Agent, logger: Logger): Promise<number> {
   process.once('SIGINT', onInterrupt);
   process.once('SIGTERM', onTerminate);
   agent.once('fatal', () => { void stop(1, true); });
+  let watcher: NodeJS.Timeout | null = null;
+  if (target) {
+    agent.on('rejected', (event: RejectedEvent) => {
+      if (event.requestId !== target) return;
+      served ||= event.wasActive;
+      if (served) logger.info(`Request ${target} ended: ${event.reason}`);
+      else logger.error(`Cannot serve ${target}: ${event.reason}`);
+      void stop(served ? 0 : 1);
+    });
+    watcher = setInterval(() => {
+      const job = agent.dashboardState.job;
+      const mine = job?.kind === 'request' && job.id === target;
+      if (mine && job.timerEndsAt) served = true;
+      if (served && (!mine || Date.now() > (job?.timerEndsAt ?? 0) + 3_000)) {
+        logger.success(`Booking ${target} finished. Run sublet start to stay online for public calls.`);
+        void stop(0);
+      }
+    }, 1_000);
+  }
   try {
     await agent.run();
   } finally {
+    if (watcher) clearInterval(watcher);
     process.removeListener('SIGINT', onInterrupt);
     process.removeListener('SIGTERM', onTerminate);
     await agent.stop();
@@ -339,8 +425,7 @@ export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<numbe
       output.write(`${JSON.stringify({ ok: true, requestId: flags.claim, ...result })}\n`);
       return 0;
     }
-    await serveClaim(cfg, flags.claim, flags, logger);
-    return 0;
+    return await serveClaim(cfg, flags.claim, flags, logger);
   }
   if (!process.stdin.isTTY) {
     output.write('\nNon-interactive terminal. Use --claim <request-id> to take a job.\n');
@@ -361,8 +446,7 @@ export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<numbe
       const fit = checkFit(picked.needsMb, gpu.primary);
       if (!fit.ok) throw new Error(fit.reason || 'This model does not fit in free VRAM');
     }
-    await serveClaim(cfg, picked.id, flags, logger);
-    return 0;
+    return await serveClaim(cfg, picked.id, flags, logger);
   } finally {
     rl.close();
   }
@@ -372,12 +456,12 @@ export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<numbe
  * Claim a request and, when no other agent is online, run this terminal as the
  * serving agent until the booking ends or the host presses Ctrl+C.
  */
-async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlags, logger: Logger): Promise<void> {
+async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlags, logger: Logger): Promise<number> {
   const existing = await verifyHostKey(cfg.server, cfg.token).catch(() => null);
   if (existing?.host?.kind === 'live' && existing.host.status === 'online') {
     const result = await claimRequest(cfg, requestId, true);
     logger.success(`Claimed ${requestId}; an already-running agent will serve it.`, { claim: result.claimId || '' });
-    return;
+    return 0;
   }
 
   const agent = new Agent({
@@ -388,7 +472,7 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
     publicMode: false,
     context: flags.context,
     slots: 1,
-    gpuOverride: flags.gpu ? { name: flags.gpu, vramMb: flags.vram || 24576 } : null,
+    gpuOverride: gpuOverrideFrom(flags),
     tokPerSec: flags.tokPerSec ?? null,
     autoInstall: !flags.noInstall,
     json: flags.json,
@@ -404,6 +488,9 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   agent.once('stop', () => { finished = true; });
+  // A cancel, release, or failed check arrives as a reject. It can come before the polling below sees the booking.
+  let rejected: RejectedEvent | null = null;
+  agent.on('rejected', (event: RejectedEvent) => { if (event.requestId === requestId) rejected = event; });
 
   const runPromise = agent.run();
   runPromise.catch(async (error) => {
@@ -421,7 +508,7 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
 
     let sawJob = false;
     let lastNotice = Date.now();
-    while (!finished) {
+    while (!finished && !rejected) {
       const job = agent.dashboardState.job;
       if (job?.kind === 'request' && job.timerEndsAt) {
         sawJob = true;
@@ -434,6 +521,14 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
       }
       await sleep(1_000);
     }
+    const ended = rejected as RejectedEvent | null;
+    if (!ended) return 0;
+    if (sawJob || ended.wasActive) {
+      logger.info(`Request ${requestId} ended: ${ended.reason}`);
+      return 0;
+    }
+    logger.error(`Cannot serve ${requestId}: ${ended.reason}`);
+    return 1;
   } finally {
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
@@ -467,7 +562,7 @@ function printRequests(requests: AgentRequest[], gpu: GpuStats | null): void {
     const payout = request.totalPayoutNanos ?? (request.hours && request.pricePerHourNanos ? request.hours * request.pricePerHourNanos : 0);
     const model = request.modelLabel || request.file || request.repo || 'unknown model';
     output.write(`${String(index + 1).padStart(2)}. ${truncate(model, 38)}  ${formatUsdNanos(payout)} / ${request.hours || '?'}h  ${needs ? `${(needs / 1024).toFixed(1)}GB` : 'VRAM ?'}  ${fit}  ${request.minTokS || 0} tok/s min\n`);
-    output.write(`    id ${request.id}  ${request.status}${request.fit ? `  ${request.fit}` : ''}\n`);
+    output.write(`    id ${request.id}  ${request.status}${request.fit ? `  ${request.fit}` : ''}${request.cached ? '  model on disk: ready now' : ''}\n`);
   }
 }
 
@@ -536,9 +631,9 @@ export function globalHelp(): string {
     'Usage: sublet <command> [options]',
     '',
     'Commands:',
-    '  login                 Save the host key from the Sublet dashboard',
+    '  login                 Link this computer to your Sublet account (opens the website)',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
-    '  start                 Connect and wait for web requests / bookings',
+    '  start [code]          Connect and serve; with a code from the website, serve that request',
     '  host <gguf>           Serve a public pay-per-token model',
     '  jobs                  Browse and claim buyer requests from the terminal',
     '  status                Show this host, wallet, and active booking',
@@ -560,6 +655,7 @@ export function globalHelp(): string {
     '  --tok-s <n>           Advertised tokens/sec',
     '  --fix                 Download llama-server when doctor needs it',
     '  --require-checksum    Fail if llama-server has no published SHA-256',
+    '  --no-browser          login: print the link instead of opening a browser',
     '  --claim <request-id>  Claim a board request non-interactively',
     '  --json                Machine-readable output',
     '  --verbose             Debug logs',
@@ -569,9 +665,11 @@ export function globalHelp(): string {
     '  --help, --version',
     '',
     'Examples:',
-    '  sublet login --key sh_...',
+    '  sublet login',
+    '  sublet login --key sh_...          (machines without a browser)',
     '  sublet doctor --fix',
     '  sublet start',
+    '  sublet start r_abc123             (the command from Take on the website)',
     '  sublet start --simulation --gpu "RTX 4060" --vram 8188',
     '  sublet host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
     '  sublet jobs',

@@ -46,6 +46,8 @@ export type ServerMessage =
   | { type: 'error'; message?: string }
   | { type: string; [key: string]: unknown };
 
+export type CachedModelInfo = { sha256: string; file: string; sizeBytes: number };
+
 export type HelloPayload = {
   type: 'hello';
   agentVersion: string;
@@ -72,6 +74,9 @@ export type HelloPayload = {
   priceOutUsd: number;
   simulate: boolean;
   publicMode: boolean;
+  /** Set by `sublet start <code>`: the request this agent wants to serve. */
+  requestId?: string | null;
+  cachedModels?: CachedModelInfo[];
 };
 
 export type HeartbeatPayload = {
@@ -173,4 +178,5 @@ export type AgentRequest = {
   timerStartedAt?: number | null;
   timerEndsAt?: number | null;
   fit?: string | null;
+  cached?: boolean;
 };

@@ -341,3 +341,29 @@ export async function gpuSummary(monitor: GpuMonitor, force = false): Promise<Gp
   if (!snapshot.gpus.length) void 0;
   return snapshot;
 }
+
+export type GpuOverride = { name: string | null; vramMb: number | null };
+
+export function vendorFromName(name: string): GpuVendor {
+  if (/nvidia|geforce|rtx|gtx|quadro|tesla/i.test(name)) return 'nvidia';
+  if (/amd|radeon/i.test(name)) return 'amd';
+  if (/apple|\bm[1-9]\b/i.test(name)) return 'apple';
+  if (/intel|\barc\b/i.test(name)) return 'intel';
+  return 'unknown';
+}
+
+/** `--gpu` / `--vram` win over detection, for cards that report wrong values (for example 4 GB on Windows). */
+export function applyGpuOverride(snapshot: GpuSnapshot, override: GpuOverride | null | undefined): GpuSnapshot {
+  if (!override || (!override.name && !override.vramMb)) return snapshot;
+  const base = snapshot.primary;
+  const name = override.name || base?.name || 'Unknown GPU';
+  const totalVramMb = override.vramMb ?? base?.totalVramMb ?? 0;
+  const primary: GpuStats = base
+    ? { ...base, name, totalVramMb, freeVramMb: override.vramMb != null ? Math.max(0, override.vramMb - base.usedVramMb) : base.freeVramMb }
+    : {
+      index: 0, name, vendor: vendorFromName(name), totalVramMb, freeVramMb: totalVramMb, usedVramMb: 0,
+      utilizationPct: 0, temperatureC: null, powerW: null, powerLimitW: null, processes: [],
+    };
+  const gpus = base ? snapshot.gpus.map((gpu) => (gpu === base ? primary : gpu)) : [primary, ...snapshot.gpus];
+  return { ...snapshot, gpus, primary, source: base ? snapshot.source : 'override' };
+}

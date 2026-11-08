@@ -1,25 +1,25 @@
 import { EventEmitter } from 'node:events';
-import { spawn } from 'node:child_process';
 import { basename } from 'node:path';
 import type { AgentConfig } from './config.js';
-import { apiUrl } from './config.js';
+import { apiUrl, hostEndpoint } from './config.js';
 import type { Logger } from './logger.js';
-import { GpuMonitor, checkFit } from './hardware/gpuMonitor.js';
-import type { GpuSnapshot, GpuStats } from './hardware/types.js';
+import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
+import type { GpuSnapshot } from './hardware/types.js';
 import { SleepGuard } from './hardware/sleepGuard.js';
 import { ensureLlamaServer, type LlamaInstall } from './engine/binaryManager.js';
-import { downloadModel, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
+import { downloadModel, listCachedModels, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
 import { checkModelUrl, estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
 import { LlamaRunner } from './engine/llamaRunner.js';
 import { canarySimulation, runCanary, simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
 import { TerminalDashboard, initialState, type DashboardJob, type DashboardState, type DashboardStatus } from './ui/terminalDashboard.js';
-import type { AgentMe, ChatMessage, HeartbeatPayload, HelloPayload, LoadJob, ServerMessage } from './types.js';
+import type { AgentMe, CachedModelInfo, ChatMessage, HeartbeatPayload, HelloPayload, LoadJob, ServerMessage } from './types.js';
 import { fetchJson, HttpError } from './util/http.js';
 import { execFile, sleep } from './util/exec.js';
 import { formatPercent, formatUsdNanos, modelShortName } from './util/format.js';
 import { clearAgentState, readAgentState, saveAgentState, type PersistedBooking, type PersistedState } from './state.js';
 import { VERSION } from './version.js';
+import { openUrl } from './util/open.js';
 
 export type AgentOptions = {
   config: AgentConfig;
@@ -33,7 +33,9 @@ export type AgentOptions = {
   priceOutUsd?: number | null;
   context?: number;
   slots?: number;
-  gpuOverride?: { name: string; vramMb: number } | null;
+  gpuOverride?: GpuOverride | null;
+  /** `sublet start <code>`: serve this request from the website. */
+  requestId?: string | null;
   tokPerSec?: number | null;
   autoInstall?: boolean;
   json?: boolean;
@@ -70,27 +72,10 @@ type ActiveJob = {
   requestId: string | null;
 };
 
-function simulatedGpu(override: { name: string; vramMb: number } | null): GpuSnapshot {
-  if (!override) {
-    return {
-      gpus: [], primary: null, source: 'simulation', platform: process.platform, checkedAt: Date.now(),
-      warnings: ['Simulation mode: no GPU was scanned.'],
-    };
-  }
-  const gpu: GpuStats = {
-    index: 0,
-    name: override.name,
-    vendor: /nvidia/i.test(override.name) ? 'nvidia' : /amd|radeon/i.test(override.name) ? 'amd' : /apple|mac/i.test(override.name) ? 'apple' : 'unknown',
-    totalVramMb: override.vramMb,
-    freeVramMb: override.vramMb,
-    usedVramMb: 0,
-    utilizationPct: 0,
-    temperatureC: null,
-    powerW: null,
-    powerLimitW: null,
-    processes: [],
-  };
-  return { gpus: [gpu], primary: gpu, source: 'override', platform: process.platform, checkedAt: Date.now(), warnings: [] };
+function simulatedGpu(override: GpuOverride | null): GpuSnapshot {
+  const empty: GpuSnapshot = { gpus: [], primary: null, source: 'simulation', platform: process.platform, checkedAt: Date.now(), warnings: [] };
+  if (!override) return { ...empty, warnings: ['Simulation mode: no GPU was scanned.'] };
+  return applyGpuOverride(empty, { name: override.name ?? 'Simulated GPU', vramMb: override.vramMb ?? 24_576 });
 }
 
 export class Agent extends EventEmitter {
@@ -106,6 +91,7 @@ export class Agent extends EventEmitter {
   private runnerContext: number | null = null;
   private gpu: GpuSnapshot;
   private model: AgentModel | null = null;
+  private cachedModels: CachedModelInfo[] = [];
   private me: AgentMe | null = null;
   private meTimer: NodeJS.Timeout | null = null;
   private gpuTimer: NodeJS.Timeout | null = null;
@@ -310,13 +296,14 @@ export class Agent extends EventEmitter {
     if (!cfg.token) throw new Error('No host key saved. Run: sublet login');
     this.logger.info(`Starting Sublet agent v${VERSION}`, { server: cfg.server, simulate: this.options.simulation });
     if (!this.options.simulation) {
-      this.gpu = await this.gpuMonitor.scan(true);
+      this.gpu = applyGpuOverride(await this.gpuMonitor.scan(true), this.options.gpuOverride);
       for (const warning of this.gpu.warnings) this.logger.warn(warning);
     }
     if (!this.gpu.primary && !this.options.simulation && !this.options.gpuOverride) {
       this.logger.warn('No GPU detected. Use --gpu "RTX 4090" --vram 24576 for a test node, or --simulation.');
     }
     this.updateGpuDashboard();
+    this.cachedModels = await listCachedModels();
     const restored = await this.restorePersistedBooking();
     if (!restored && this.options.model && !this.stopped) {
       try {
@@ -381,11 +368,13 @@ export class Agent extends EventEmitter {
   }
 
   private async endpointFor(cfg: AgentConfig): Promise<string> {
-    const url = new URL(cfg.server);
-    const local = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(url.hostname);
-    if (local) return `${cfg.server.replace(/\/+$/, '')}/h/${this.me?.user.username || 'USERNAME'}/v1`;
-    const host = url.hostname.replace(/^www\./, '');
-    return `https://${this.me?.user.username || 'USERNAME'}.${host}/api/v1`;
+    return hostEndpoint(cfg.server, this.me?.user.username);
+  }
+
+  /** Tells the server about a newly downloaded model, so the board can show it as ready on this host. */
+  private async refreshCachedModels(): Promise<void> {
+    this.cachedModels = await listCachedModels();
+    this.tunnel?.send({ type: 'models', cachedModels: this.cachedModels });
   }
 
   private async prepareStartupModel(input: string): Promise<void> {
@@ -453,6 +442,7 @@ export class Agent extends EventEmitter {
         showProgress: true,
         signal: this.startup.signal,
       });
+      await this.refreshCachedModels();
     } else {
       loaded = await verifyModelFile(input, { sha256: opts.expectedSha ?? null, layers: opts.expectedLayers ?? null, context: opts.context, slots: this.runnerSlots() });
     }
@@ -551,6 +541,8 @@ export class Agent extends EventEmitter {
     const advertised = this.options.simulation ? (this.options.tokPerSec || 24) : (this.lastSpeed || this.options.tokPerSec || 24);
     return {
       type: 'hello',
+      requestId: this.options.requestId ?? null,
+      cachedModels: this.cachedModels,
       agentVersion: VERSION,
       platform: process.platform,
       arch: process.arch,
@@ -629,13 +621,20 @@ export class Agent extends EventEmitter {
       case 'booking':
         this.applyBooking(message as unknown as Record<string, unknown>);
         return;
-      case 'reject':
+      case 'reject': {
+        const requestId = String(message.requestId || '');
+        const reason = String(message.reason || 'unknown');
         this.bookingWake = false;
         this.loadingModel = false;
         this.clearPersistedBooking();
         void this.releaseWakeLockIfIdle();
-        this.dashboard.update({ message: `Server rejected load: ${String(message.reason || 'unknown')}`, wakeLock: false });
+        const current = this.dashboard.current.job;
+        const mine = current?.kind === 'request' && current.id === requestId;
+        if (mine) this.dashboard.update({ job: null });
+        this.dashboard.update({ message: `Request ${requestId || '?'} stopped: ${reason}`, wakeLock: false });
+        this.emit('rejected', { requestId, reason, wasActive: mine && Boolean(current.timerEndsAt) });
         return;
+      }
       case 'error':
         this.logger.warn(String(message.message || 'Server error'));
         return;
@@ -1012,18 +1011,7 @@ export class Agent extends EventEmitter {
   }
 
   private openExternal(url: string): void {
-    try {
-      if (process.platform === 'win32') {
-        const child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true });
-        child.unref();
-      } else {
-        const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
-        const child = spawn(command, [url], { detached: true, stdio: 'ignore' });
-        child.unref();
-      }
-    } catch {
-      /* the URL is also printed in the dashboard */
-    }
+    openUrl(url);
   }
 
   private async copyText(text: string): Promise<boolean> {
@@ -1051,7 +1039,7 @@ export class Agent extends EventEmitter {
     this.gpuTimer = setInterval(() => {
       void (async () => {
         try {
-          this.gpu = await this.gpuMonitor.scan(true);
+          this.gpu = applyGpuOverride(await this.gpuMonitor.scan(true), this.options.gpuOverride);
           this.updateGpuDashboard();
           const ownPid = this.runner?.pid;
           const others = (this.gpu.primary?.processes || []).filter((proc) =>

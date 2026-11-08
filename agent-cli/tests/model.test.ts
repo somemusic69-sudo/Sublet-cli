@@ -5,7 +5,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { downloadModel, modelPathFor, verifyModelFile } from '../src/engine/modelManager.js';
+import { downloadModel, listCachedModels, modelPathFor, verifyModelFile } from '../src/engine/modelManager.js';
 import { BufferWriter, buildGgufSample, checkModelUrl, fetchModelUrl } from '../src/engine/gguf.js';
 
 const MODEL = buildGgufSample([
@@ -275,6 +275,30 @@ test('a download that streams past the expected size is cut off and removed', as
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cached models are listed by SHA-256 only when the file still matches its sidecar', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-cache-'));
+  try {
+    const { server, url } = await withServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': MODEL.length });
+      res.end(MODEL);
+    });
+    try {
+      await downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await writeFile(join(dir, 'no-sidecar.gguf'), MODEL);
+    const listed = await listCachedModels(dir);
+    assert.deepEqual(listed, [{ sha256: SHA, file: 'model.gguf', sizeBytes: MODEL.length }]);
+    await writeFile(join(dir, 'model.gguf'), Buffer.concat([MODEL, Buffer.from('changed')]));
+    assert.deepEqual(await listCachedModels(dir), []);
+    assert.deepEqual(await listCachedModels(join(dir, 'missing')), []);
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });

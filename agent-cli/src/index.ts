@@ -27,6 +27,7 @@ const BOOLEAN_FLAGS: Record<string, keyof GlobalFlags> = {
   '--no-install': 'noInstall',
   '--watch': 'watch',
   '--require-checksum': 'requireChecksum',
+  '--no-browser': 'noBrowser',
   '--help': 'help',
   '--version': 'version',
 };
@@ -74,6 +75,7 @@ export function parseArgv(argv: string[]): Parsed {
     version: false,
     watch: false,
     requireChecksum: false,
+    noBrowser: false,
     positionals: [],
   };
   let command = '';

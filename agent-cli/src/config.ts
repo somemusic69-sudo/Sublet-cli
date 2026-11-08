@@ -33,6 +33,11 @@ export function cacheDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(subletHome(env), 'cache');
 }
 
+/** The OpenAI-compatible base URL that buyers use for this host's public market. */
+export function hostEndpoint(server: string, username: string | null | undefined): string {
+  return `${server.replace(/\/+$/, '')}/h/${username || 'USERNAME'}/v1`;
+}
+
 export function normalizeServer(raw: string): string {
   let value = raw.trim();
   if (!value) throw new Error('Server URL is empty');
