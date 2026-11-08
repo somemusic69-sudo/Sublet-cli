@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  fetchHfFileInfo,
   BufferWriter,
   buildGgufSample,
   estimateVramMb,
@@ -107,4 +108,16 @@ test('VRAM estimate reserves KV cache for every parallel slot', () => {
   const four = estimateVramMb({ paramB: 8, quant: 'Q4_K_M', context: 8192, layers: 32, slots: 4 });
   assert.equal(estimateVramMb({ paramB: 8, quant: 'Q4_K_M', context: 8192, layers: 32, slots: 1 }), one);
   assert.equal(four - one, 3 * 1024);
+});
+
+test('the SHA-256 lookup uses the revision from the model link', async () => {
+  const seen: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request) => {
+    seen.push(String(input));
+    return new Response(JSON.stringify({ siblings: [{ rfilename: 'm.gguf', lfs: { sha256: 'f'.repeat(64), size: 9 } }] }), { status: 200 });
+  }) as typeof fetch;
+  const info = await fetchHfFileInfo('org/repo', 'm.gguf', 1_000, 'refs/pr/3', fetchImpl);
+  assert.equal(seen[0], 'https://huggingface.co/api/models/org/repo/revision/refs%2Fpr%2F3?blobs=true');
+  assert.equal(info.sha256, 'f'.repeat(64));
+  assert.equal(info.size, 9);
 });

@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { open, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { ensureDir, fileSize, freeDiskBytes, removeIfExists, sha256File } from '../util/fs.js';
 import { formatBytes } from '../util/format.js';
@@ -17,6 +17,7 @@ import {
 } from './gguf.js';
 import { modelsDir } from '../config.js';
 import { USER_AGENT } from '../version.js';
+import type { CachedModelInfo } from '../types.js';
 
 export type ModelProgress = {
   phase: 'download' | 'verify' | 'header' | 'cache';
@@ -116,6 +117,26 @@ async function readSidecar(path: string): Promise<Sidecar | null> {
   } catch {
     return null;
   }
+}
+
+/** Verified GGUF files on disk, by SHA-256, so the market can show "ready now" for matching requests. */
+export async function listCachedModels(cacheDir = modelsDir()): Promise<CachedModelInfo[]> {
+  let entries;
+  try {
+    entries = await readdir(cacheDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const models: CachedModelInfo[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.gguf$/i.test(entry.name)) continue;
+    const path = join(cacheDir, entry.name);
+    const [sidecar, info] = await Promise.all([readSidecar(path), stat(path).catch(() => null)]);
+    if (!sidecar || !info || !/^[0-9a-f]{64}$/i.test(sidecar.sha256) || info.size !== sidecar.size) continue;
+    models.push({ sha256: sidecar.sha256.toLowerCase(), file: entry.name, sizeBytes: info.size });
+    if (models.length >= 200) break;
+  }
+  return models;
 }
 
 async function writeSidecar(path: string, sha256: string, info: GgufInfo, size: number): Promise<void> {

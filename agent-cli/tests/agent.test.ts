@@ -47,7 +47,7 @@ async function fakeServer(options: { meDelayMs?: number; onSocket?: (socket: Web
   };
 }
 
-function agentFor(server: string, simulation: boolean) {
+function agentFor(server: string, simulation: boolean, extra: { requestId?: string } = {}) {
   return new Agent({
     config: { server, token: 'sh_test', wsPath: '/tunnel', updatedAt: 0 },
     logger: new Logger({ level: 'silent' }),
@@ -55,6 +55,7 @@ function agentFor(server: string, simulation: boolean) {
     tokPerSec: 500,
     json: true,
     gpuOverride: { name: 'Fake GPU', vramMb: 8192 },
+    ...extra,
   });
 }
 
@@ -130,6 +131,31 @@ test('a server load that points at a local file is refused before anything is re
     assert.equal(failed?.requestId, 'r1');
     assert.match(String(failed?.message), /valid URL/);
     assert.equal(server.frames.some((f) => f.type === 'loaded'), false);
+  } finally {
+    await agent.stop();
+    await server.close();
+  }
+});
+
+test('`sublet start <code>` sends the code in hello and reports a reject for that request', async () => {
+  const server = await fakeServer({
+    onSocket: (socket) => {
+      socket.on('message', (raw) => {
+        const frame = JSON.parse(String(raw)) as Frame;
+        if (frame.type === 'hello') socket.send(JSON.stringify({ type: 'reject', requestId: 'r_code123', reason: 'Another host already has this request.' }));
+      });
+    },
+  });
+  const agent = agentFor(server.url, true, { requestId: 'r_code123' });
+  try {
+    const rejected = new Promise<{ requestId: string; reason: string }>((resolve) => agent.once('rejected', resolve));
+    void agent.run().catch(() => undefined);
+    const event = await rejected;
+    assert.equal(event.requestId, 'r_code123');
+    assert.match(event.reason, /Another host/);
+    const hello = server.frames.find((f) => f.type === 'hello');
+    assert.equal(hello?.requestId, 'r_code123');
+    assert.ok(Array.isArray(hello?.cachedModels));
   } finally {
     await agent.stop();
     await server.close();

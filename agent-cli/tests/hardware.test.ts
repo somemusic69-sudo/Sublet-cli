@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { checkFit, choosePrimary, parseNvidiaCsv, parseNvidiaProcesses, parseRocmJson, parseWmicJson } from '../src/hardware/gpuMonitor.js';
+import { applyGpuOverride, checkFit, choosePrimary, parseNvidiaCsv, parseNvidiaProcesses, parseRocmJson, parseWmicJson } from '../src/hardware/gpuMonitor.js';
 import { SleepGuard, sleepGuardAvailable, windowsSleepScript } from '../src/hardware/sleepGuard.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -132,4 +132,25 @@ test('sleep guard availability follows the platform tool', async () => {
   assert.equal(await sleepGuardAvailable('win32'), true);
   assert.equal(await sleepGuardAvailable('darwin', (async (cmd: string) => cmd === 'caffeinate' ? '/usr/bin/caffeinate' : null) as never), true);
   assert.equal(await sleepGuardAvailable('linux', (async () => null) as never), false);
+});
+
+test('--vram and --gpu override wrong detected values, and create a GPU when none is detected', () => {
+  const detected = {
+    gpus: [{ index: 0, name: 'AMD Radeon RX 7900 XTX', vendor: 'amd' as const, totalVramMb: 4095, freeVramMb: 3000, usedVramMb: 1095, utilizationPct: 3, temperatureC: null, powerW: null, powerLimitW: null, processes: [] }],
+    primary: null as any,
+    source: 'wmic',
+    platform: 'win32' as NodeJS.Platform,
+    checkedAt: 0,
+    warnings: [],
+  };
+  detected.primary = detected.gpus[0];
+  const fixed = applyGpuOverride(detected, { name: null, vramMb: 24_576 });
+  assert.equal(fixed.primary?.name, 'AMD Radeon RX 7900 XTX');
+  assert.equal(fixed.primary?.totalVramMb, 24_576);
+  assert.equal(fixed.primary?.freeVramMb, 24_576 - 1095);
+  assert.equal(fixed.gpus[0], fixed.primary);
+  assert.equal(applyGpuOverride(detected, null), detected);
+  const none = applyGpuOverride({ ...detected, gpus: [], primary: null }, { name: 'NVIDIA GeForce RTX 4090', vramMb: null });
+  assert.equal(none.primary?.vendor, 'nvidia');
+  assert.equal(none.source, 'override');
 });

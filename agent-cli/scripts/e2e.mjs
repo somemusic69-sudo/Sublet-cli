@@ -291,6 +291,63 @@ try {
     if (jobsAgent.child.exitCode == null) await stopAgent(jobsAgent);
   }
 
+  // Device login: `sublet login` shows a code, the host approves it on the website, and the CLI gets its own key.
+  const linkHome = await mkdtemp(join(tmpdir(), 'sublet-e2e-link-'));
+  try {
+    const linkProc = spawn(process.execPath, [CLI, 'login', '--json', '--no-browser', '--server', SERVER], {
+      env: { ...process.env, SUBLET_HOME: linkHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let linkOutput = '';
+    linkProc.stdout.on('data', (chunk) => { linkOutput += chunk.toString(); });
+    linkProc.stderr.on('data', (chunk) => { linkOutput += chunk.toString(); });
+    const linkExit = new Promise((resolve) => linkProc.once('exit', resolve));
+    const codeEvent = await waitFor(async () => {
+      const line = linkOutput.split('\n').find((entry) => entry.includes('"event":"code"'));
+      return line ? JSON.parse(line) : null;
+    }, 10_000, 'the login code');
+    const approve = await api('/api/cli/link', { method: 'POST', body: JSON.stringify({ userCode: codeEvent.userCode }) }, host.cookie);
+    assert(approve.ok, `approving the login code failed: ${approve.status} ${approve.text}`);
+    const linkCode = await linkExit;
+    assert(linkCode === 0 && linkOutput.includes('"ok":true'), `device login failed: ${linkOutput}`);
+    const linked = JSON.parse(await readFile(join(linkHome, 'config.json'), 'utf8'));
+    assert(linked.token?.startsWith('sh_') && linked.token !== token, 'device login did not save a new host key');
+    log('device login', `linked a second computer to @${host.user.username} without copying a key`);
+  } finally {
+    await rm(linkHome, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // Take on the website, then `sublet start <code>`. A second host cannot take or start the same request.
+  const takeRequest = await createRequest(ava.cookie, `take${Date.now()}`);
+  const taken = await api(`/api/board/${takeRequest.id}/take`, { method: 'POST', body: '{}' }, host.cookie);
+  assert(taken.ok && taken.body.startCommand?.endsWith(takeRequest.id), `take failed: ${taken.status} ${taken.text}`);
+  const rival = await signup(`rival${String(Date.now()).slice(-7)}`);
+  const rivalTake = await api(`/api/board/${takeRequest.id}/take`, { method: 'POST', body: '{}' }, rival.cookie);
+  assert(rivalTake.status === 409, `a second host took a held request: ${rivalTake.status}`);
+  const rivalToken = (await api('/api/host/token', { method: 'POST', body: '{}' }, rival.cookie)).body.token;
+  const rivalStart = spawnCli(['start', takeRequest.id, '--simulation', '--no-color', '--gpu', 'NVIDIA GeForce RTX 3090', '--vram', '24576', '--server', SERVER, '--key', rivalToken]);
+  const rivalExit = await waitFor(async () => (rivalStart.child.exitCode != null ? { code: rivalStart.child.exitCode } : null), 20_000, 'the rival start to be refused');
+  assert(rivalExit.code === 1 && /Another host/.test(rivalStart.output()), `a rival start was not refused: ${rivalStart.output().slice(-400)}`);
+  const coded = spawnCli([
+    'start', takeRequest.id, '--simulation', '--no-color', '--tok-s', '40',
+    '--gpu', 'NVIDIA GeForce RTX 4060', '--vram', '8188', '--server', SERVER, '--key', token,
+  ]);
+  try {
+    await waitFor(async () => {
+      const result = await api('/api/agent/me', { headers: { authorization: `Bearer ${token}` } });
+      return result.body.activeRequest?.id === takeRequest.id && result.body.activeRequest.timerStartedAt ? result.body.activeRequest : null;
+    }, 25_000, 'sublet start <code> to serve the taken request');
+    const codedChat = await sseChat(`/r/${takeRequest.id}/v1/chat/completions`, 16);
+    assert(codedChat.final?.sublet?.charged === false, 'the booked chat was charged');
+    await api(`/api/board/${takeRequest.id}/cancel`, { method: 'POST', body: '{}' }, ava.cookie);
+    const codedExit = await waitFor(async () => (coded.child.exitCode != null ? { code: coded.child.exitCode } : null), 20_000, 'sublet start <code> to exit after the request ended');
+    assert(codedExit.code === 0, `sublet start <code> exited with ${codedExit.code}: ${coded.output().slice(-400)}`);
+    log('take + start <code>', `took ${takeRequest.id} on the website and served it with sublet start <code>; the rival was refused`);
+  } finally {
+    if (coded.child.exitCode == null) await stopAgent(coded);
+    if (rivalStart.child.exitCode == null) await stopAgent(rivalStart);
+  }
+
   console.log(`\n${results.length} end-to-end checks passed against ${SERVER}.`);
 } finally {
   if (agent) await stopAgent(agent);

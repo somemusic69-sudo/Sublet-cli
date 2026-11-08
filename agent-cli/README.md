@@ -26,14 +26,31 @@ Postgres/SQLite ledger, wallet, reliability, request board
 
 ```bash
 # On the GPU machine
-npx sublet-cli login --key sh_... --server https://sublet.example.com
+npx sublet-cli login --server https://sublet.example.com
 npx sublet-cli doctor --fix
 npx sublet-cli start
 ```
 
-The host key is issued by the Sublet website. `login` verifies it before saving.
+`login` shows a short code and opens the Sublet website. Click **Connect** there,
+and the CLI receives its own host key. On a machine without a browser (for example
+over SSH), open the printed link on any phone or laptop. `login --key sh_...`
+still works for scripts.
 `doctor --fix` scans the GPU and downloads the matching prebuilt `llama-server`
 (CUDA for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback).
+
+To serve one buyer request, pick it on the website's market. The board shows
+which requests fit your GPU and which models are already on your disk. Click
+**Take**, so no other host can claim it, then run the command that the website
+shows:
+
+```bash
+npx sublet-cli start r_abc123
+```
+
+The agent downloads and verifies the model, passes the canary, serves the
+booking, and exits when the booking ends. If you do not start within 15 minutes,
+the request goes back to the board. With `sublet start` already running, a Take
+on the website starts the download at once.
 
 For public pay-per-token hosting from the terminal:
 
@@ -57,9 +74,9 @@ ends or you press Ctrl+C.
 
 | Command | Purpose |
 | --- | --- |
-| `sublet login` | Prompt for a host key (or use `--key`), verify it, save it with mode 0600. |
+| `sublet login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
 | `sublet doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
-| `sublet start` | Main mode: connect, wait for a web claim, download/verify the model, pass the canary, serve. |
+| `sublet start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the canary, serve. With a code, serve that request and exit when it ends. |
 | `sublet host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
 | `sublet jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
 | `sublet status` | Read-only host, reliability, wallet and active-booking summary. |
@@ -67,7 +84,8 @@ ends or you press Ctrl+C.
 
 Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 `--vram`, `--ctx`, `--slots`, `--price`, `--price-in`, `--price-out`,
-`--tok-s`, `--no-install`, `--json`, `--verbose`, `--no-color`, `--once`.
+`--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--no-color`, `--once`.
+`--gpu` and `--vram` also correct a wrongly detected GPU name or VRAM size on a real host.
 
 ### Test mode
 
@@ -209,10 +227,11 @@ server that implements the same small contract:
 | --- | --- |
 | `GET /api/health` | doctor reachability check |
 | `GET /api/agent/me` | host key verification, wallet, host, active request |
-| `GET /api/agent/requests` | open buyer requests + VRAM fit |
+| `POST /api/cli/login`, `POST /api/cli/login/poll` | device login: a user code for the website, then the host key once it is approved |
+| `GET /api/agent/requests` | open buyer requests + VRAM fit + `cached` (the model is already on this host's disk) |
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
-| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `chunk`, `done`, `error` | agent → server |
+| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublet start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. |
 | HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublet-cli@latest` |
 | `welcome`, `canary`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent |
 

@@ -312,8 +312,8 @@ export async function fetchModelUrl(
 
 export type HfFileInfo = { sha256: string | null; size: number | null; siblings: string[] };
 
-export async function fetchHfFileInfo(repo: string, file: string, timeoutMs = 15_000): Promise<HfFileInfo> {
-  const response = await fetch(`https://huggingface.co/api/models/${repo}?blobs=true`, {
+export async function fetchHfFileInfo(repo: string, file: string, timeoutMs = 15_000, rev = 'main', fetchImpl: typeof fetch = fetch): Promise<HfFileInfo> {
+  const response = await fetchImpl(`https://huggingface.co/api/models/${repo}/revision/${encodeURIComponent(rev)}?blobs=true`, {
     headers: { 'user-agent': USER_AGENT },
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -368,7 +368,7 @@ export async function inspectHuggingFace(rawUrl: string, timeoutMs = 15_000): Pr
   };
   const signal = AbortSignal.timeout(timeoutMs);
   try {
-    const meta = await fetchHfFileInfo(parsed.repo, parsed.file, timeoutMs);
+    const meta = await fetchHfFileInfo(parsed.repo, parsed.file, timeoutMs, parsed.rev);
     result.sha256 = meta.sha256;
     result.size = meta.size;
   } catch {
