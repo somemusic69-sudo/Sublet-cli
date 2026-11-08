@@ -100,7 +100,7 @@ All files downloaded on the Host's PC stay neatly inside one folder (`~/.sublet/
   1. Receives `{ requestId, payload }` from your central server over WebSocket.
   2. Sends `POST http://127.0.0.1:<port>/v1/chat/completions` with `stream: true`.
   3. Streams every token chunk back over the WebSocket (`{ requestId, chunk }`) with sub-millisecond overhead.
-* **Canary Handshake Support:** Right after `llama-server` finishes loading the model into VRAM, the CLI notifies the central server (`READY_FOR_HANDSHAKE`), runs the server's `temp=0` verification prompt, and only starts the Buyer Request timer once the server replies `VERIFIED`.
+* **Model Checks:** Every job returns token probabilities for its first tokens. The central server sends hidden check prompts as normal jobs and compares the probabilities with other hosts that run the same file, so a host cannot serve a cheaper model than the one it claims. The booking timer starts after the first check.
 
 ---
 

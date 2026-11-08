@@ -1,4 +1,11 @@
-import type { ChatMessage } from '../types.js';
+import type { ChatMessage, TokenPosition } from '../types.js';
+
+/**
+ * Token probabilities go out with the first positions of every job, so the server can check the model behind any job
+ * (its model checks look exactly like normal work). Later tokens are sent without them to keep frames small.
+ */
+export const PROBED_POSITIONS = 32;
+const TOP_ALTERNATIVES = 5;
 
 export type ProxyJob = {
   jobId: string;
@@ -15,15 +22,16 @@ export type StreamResult = {
   promptTokens: number;
   completionTokens: number;
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
-  tokens: string[];
-  logprobs: number[];
   ttftMs: number | null;
   tokPerSec: number | null;
 };
 
+/** `positions` holds the probabilities of the tokens in this chunk, for the first PROBED_POSITIONS tokens only. */
+export type ChunkHandler = (text: string, positions: TokenPosition[]) => void;
+
 export type StreamOptions = {
   signal?: AbortSignal;
-  onChunk?: (text: string) => void;
+  onChunk?: ChunkHandler;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 };
@@ -80,6 +88,19 @@ function asNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+type LogprobEntry = { token?: unknown; logprob?: unknown; top_logprobs?: Array<{ token?: unknown; logprob?: unknown }> };
+
+function toPosition(entry: LogprobEntry): TokenPosition | null {
+  const l = asNumber(entry.logprob);
+  if (typeof entry.token !== 'string' || l == null) return null;
+  const top: Array<[string, number]> = [];
+  for (const alt of Array.isArray(entry.top_logprobs) ? entry.top_logprobs.slice(0, TOP_ALTERNATIVES) : []) {
+    const value = asNumber(alt.logprob);
+    if (typeof alt.token === 'string' && value != null) top.push([alt.token, value]);
+  }
+  return { t: entry.token, l, top };
+}
+
 export async function streamChat(llamaUrl: string, job: ProxyJob, options: StreamOptions = {}): Promise<StreamResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -92,9 +113,9 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
   let text = '';
   let finishReason = 'stop';
   let usage: StreamResult['usage'] = null;
-  const tokens: string[] = [];
-  const logprobs: number[] = [];
   let chunkCount = 0;
+  let probed = 0;
+  let pending: TokenPosition[] = [];
 
   try {
     controller.signal.throwIfAborted();
@@ -108,6 +129,8 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
         stream_options: { include_usage: true },
         temperature: job.temperature,
         max_tokens: job.maxTokens,
+        logprobs: true,
+        top_logprobs: TOP_ALTERNATIVES,
         ...(job.seed != null ? { seed: job.seed } : {}),
       }),
       signal: controller.signal,
@@ -146,21 +169,21 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
         const choices = Array.isArray(json.choices) ? json.choices as Array<Record<string, unknown>> : [];
         for (const choice of choices) {
           const delta = choice.delta && typeof choice.delta === 'object' ? choice.delta as Record<string, unknown> : {};
+          const lp = choice.logprobs && typeof choice.logprobs === 'object' ? choice.logprobs as { content?: LogprobEntry[] } : null;
+          for (const entry of Array.isArray(lp?.content) ? lp.content : []) {
+            if (probed >= PROBED_POSITIONS) break;
+            const position = toPosition(entry);
+            if (!position) continue;
+            pending.push(position);
+            probed++;
+          }
           const piece = deltaContent(delta.content);
           if (piece) {
             if (firstTokenAt == null) firstTokenAt = Date.now();
             text += piece;
-            tokens.push(piece);
             chunkCount++;
-            options.onChunk?.(piece);
-          }
-          const lp = choice.logprobs && typeof choice.logprobs === 'object' ? choice.logprobs as { content?: Array<{ token?: string; logprob?: number }> } : null;
-          if (lp?.content) {
-            for (const entry of lp.content) {
-              if (typeof entry.token === 'string') tokens.push(entry.token);
-              const value = asNumber(entry.logprob);
-              if (value != null) logprobs.push(value);
-            }
+            options.onChunk?.(piece, pending);
+            pending = [];
           }
           if (typeof choice.finish_reason === 'string' && choice.finish_reason) finishReason = choice.finish_reason;
         }
@@ -187,8 +210,6 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
       promptTokens: usage?.prompt_tokens || 0,
       completionTokens: completion,
       usage,
-      tokens,
-      logprobs,
       ttftMs: firstTokenAt ? firstTokenAt - started : null,
       tokPerSec: completion / (elapsed / 1000),
     };
@@ -196,43 +217,6 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', onAbort);
   }
-}
-
-export async function runCanary(llamaUrl: string, prompt: string, options: StreamOptions = {}): Promise<{ tokens: string[]; logprobs: number[]; text: string }> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl(`${llamaUrl.replace(/\/+$/, '')}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      model: 'local',
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-      temperature: 0,
-      seed: 42,
-      max_tokens: 8,
-      logprobs: true,
-      top_logprobs: 1,
-    }),
-    signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Canary request failed with ${response.status}${body ? `: ${body.slice(0, 200)}` : ''}`);
-  }
-  const json = await response.json() as {
-    choices?: Array<{
-      message?: { content?: unknown };
-      logprobs?: { content?: Array<{ token?: string; logprob?: number }> };
-    }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
-  const choice = json.choices?.[0];
-  const text = deltaContent(choice?.message?.content);
-  const content = choice?.logprobs?.content || [];
-  const tokens = content.map((entry) => entry.token).filter((token): token is string => typeof token === 'string' && token.length > 0);
-  const logprobs = content.map((entry) => asNumber(entry.logprob)).filter((value): value is number => value != null);
-  if (!tokens.length && text) tokens.push(...text.split(/(\s+)/).filter((part) => part.trim().length > 0));
-  return { tokens, logprobs, text };
 }
 
 export function simulateReply(prompt: string, model: string): string {
@@ -260,7 +244,12 @@ export function simulateReply(prompt: string, model: string): string {
   ].join(' ');
 }
 
-export async function simulateChat(job: ProxyJob, options: { signal?: AbortSignal; tokPerSec?: number; onChunk?: (text: string) => void } = {}): Promise<StreamResult> {
+/** Stand-in probabilities for test nodes: the same shape as llama-server's, so the server's checks run end to end. */
+export function simulatedPosition(token: string): TokenPosition {
+  return { t: token, l: -0.05, top: [[token, -0.05], [' the', -3.2], [' a', -3.9], ['.', -4.4], [',', -4.8]] };
+}
+
+export async function simulateChat(job: ProxyJob, options: { signal?: AbortSignal; tokPerSec?: number; onChunk?: ChunkHandler } = {}): Promise<StreamResult> {
   const prompt = job.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n');
   const text = simulateReply(prompt, job.model || 'sublet-simulator');
   const pieces = text.split(/(\s+)/).filter((piece) => piece.length > 0);
@@ -268,12 +257,12 @@ export async function simulateChat(job: ProxyJob, options: { signal?: AbortSigna
   let sent = '';
   let first: number | null = null;
   const delay = Math.max(5, Math.round(1000 / Math.max(5, options.tokPerSec ?? 24)));
-  for (const piece of pieces) {
+  for (const [index, piece] of pieces.entries()) {
     if (options.signal?.aborted) break;
     if (first == null) first = Date.now();
     await new Promise((r) => setTimeout(r, delay));
     sent += piece;
-    options.onChunk?.(piece);
+    options.onChunk?.(piece, index < PROBED_POSITIONS ? [simulatedPosition(piece)] : []);
   }
   const elapsed = Math.max(1, Date.now() - started);
   return {
@@ -282,13 +271,7 @@ export async function simulateChat(job: ProxyJob, options: { signal?: AbortSigna
     promptTokens: Math.max(1, Math.ceil(prompt.length / 4)),
     completionTokens: pieces.length,
     usage: { prompt_tokens: Math.max(1, Math.ceil(prompt.length / 4)), completion_tokens: pieces.length, total_tokens: pieces.length + Math.ceil(prompt.length / 4) },
-    tokens: pieces,
-    logprobs: [],
     ttftMs: first ? first - started : null,
     tokPerSec: pieces.length / (elapsed / 1000),
   };
-}
-
-export function canarySimulation(): { tokens: string[]; logprobs: number[] } {
-  return { tokens: ['Paris'], logprobs: [-0.01] };
 }

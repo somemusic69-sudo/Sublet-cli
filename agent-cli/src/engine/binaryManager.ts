@@ -1,6 +1,6 @@
 import { createWriteStream } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, normalize, sep } from 'node:path';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 import { binDir, cacheDir } from '../config.js';
@@ -246,7 +246,7 @@ async function downloadFile(url: string, dest: string, options: InstallOptions &
   throw new Error(`Could not download ${basename(url)}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function extractArchive(archive: string, destination: string): Promise<void> {
+export async function extractArchive(archive: string, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true });
   const lower = archive.toLowerCase();
   if (lower.endsWith('.zip')) {
@@ -272,18 +272,50 @@ async function extractArchive(archive: string, destination: string): Promise<voi
     return;
   }
   if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+    // Linux and macOS builds ship library link chains (libllama.so -> libllama.so.0 -> libllama.so.0.9.0).
+    // tar refuses to create a link through another link, so links are skipped here and copied as files below.
+    const links = new Map<string, { linkpath: string; hard: boolean }>();
     await tar.x({
       file: archive,
       cwd: destination,
       strict: true,
-      filter: (path) => {
+      filter: (path, entry) => {
         safeJoin(destination, path);
+        const type = 'type' in entry ? entry.type : undefined;
+        if (type === 'SymbolicLink' || type === 'Link') {
+          links.set(path.replace(/\/+$/, ''), { linkpath: String((entry as { linkpath?: string }).linkpath ?? ''), hard: type === 'Link' });
+          return false;
+        }
         return true;
       },
     });
+    await materializeLinks(destination, links);
     return;
   }
   throw new Error(`Unsupported archive type: ${basename(archive)}`);
+}
+
+/** Copies the file each archive link points to, following link chains, and never outside the destination. */
+async function materializeLinks(destination: string, links: Map<string, { linkpath: string; hard: boolean }>): Promise<void> {
+  const resolveLink = (path: string, depth = 0): string => {
+    const link = links.get(path);
+    if (!link) return path;
+    if (depth > 16) throw new Error(`Archive link loop at ${path}`);
+    const target = link.hard
+      ? normalize(link.linkpath)
+      : normalize(join(dirname(path), link.linkpath));
+    safeJoin(destination, target);
+    return resolveLink(target.split(sep).join('/'), depth + 1);
+  };
+  for (const path of links.keys()) {
+    const source = safeJoin(destination, resolveLink(path));
+    const info = await stat(source).catch(() => null);
+    if (!info?.isFile()) continue;
+    const target = safeJoin(destination, path);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(source, target);
+    await chmod(target, info.mode & 0o777).catch(() => undefined);
+  }
 }
 
 async function locateServerBinary(dir: string): Promise<string | null> {

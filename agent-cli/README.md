@@ -47,7 +47,7 @@ shows:
 npx sublet-cli start r_abc123
 ```
 
-The agent downloads and verifies the model, passes the canary, serves the
+The agent downloads and verifies the model, passes the model check, serves the
 booking, and exits when the booking ends. If you do not start within 15 minutes,
 the request goes back to the board. With `sublet start` already running, a Take
 on the website starts the download at once.
@@ -76,7 +76,7 @@ ends or you press Ctrl+C.
 | --- | --- |
 | `sublet login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
 | `sublet doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
-| `sublet start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the canary, serve. With a code, serve that request and exit when it ends. |
+| `sublet start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request and exit when it ends. |
 | `sublet host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
 | `sublet jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
 | `sublet status` | Read-only host, reliability, wallet and active-booking summary. |
@@ -95,7 +95,7 @@ Everything can be exercised without a GPU or a multi-GB download:
 sublet start --simulation --gpu "NVIDIA GeForce RTX 4060" --vram 8188 --tok-s 24
 ```
 
-Simulation mode still uses the real tunnel, metering, billing, canary, booking
+Simulation mode still uses the real tunnel, metering, billing, model checks, booking
 timer, reconnect logic and dashboard. Only the generated words are a stand-in.
 The `simulate` flag on the `hello` frame tells the server this is a test node.
 
@@ -120,7 +120,7 @@ agent-cli/
 │   │   └── gguf.ts              header parser + VRAM estimator
 │   ├── network/
 │   │   ├── tunnelClient.ts      WSS, 1/2/5/10/15/30s backoff, heartbeat, dead-link detection, auth fail, version gate
-│   │   └── streamProxy.ts       SSE parser, stream=true piping, canary logprobs
+│   │   └── streamProxy.ts       SSE parser, stream=true piping, token probabilities
 │   └── ui/
 │       ├── terminalDashboard.ts the overnight status box
 │       └── progress.ts          download bar with speed and ETA
@@ -186,9 +186,13 @@ from zero rather than corrupting weights.
    claims/loads, so a host does not fail a booking on an OOM.
 5. **Locked engine flags.** `--n-gpu-layers 999 --ctx-size <n> --parallel <n>
    --cont-batching --log-disable`, bound to `127.0.0.1`.
-6. **Canary.** After load, the central server sends a `temperature=0, seed=42`
-   prompt. The timer starts only after the server receives the agent's
-   deterministic tokens/logprobs and replies `VERIFIED`.
+6. **Model checks.** Every job asks `llama-server` for token probabilities
+   (`logprobs`, top 5), and the first 32 tokens of every job carry them to the
+   server. The server sends hidden check prompts as normal `infer` jobs (a host
+   cannot tell them apart) and compares the probabilities with other hosts that
+   run the same file, or with a trusted reference host. The booking timer starts
+   only after the first check, and checks continue at random times. Asking for
+   probabilities costs `llama-server` a little extra work on every token.
 7. **Sleep guard.** Windows uses a native `SetThreadExecutionState` loop;
    macOS uses `caffeinate -dimsu`; Linux uses `systemd-inhibit`. The lock is
    released when the job ends and on process exit.
@@ -231,18 +235,18 @@ server that implements the same small contract:
 | `GET /api/agent/requests` | open buyer requests + VRAM fit + `cached` (the model is already on this host's disk) |
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
-| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublet start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. |
+| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublet start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
 | HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublet-cli@latest` |
-| `welcome`, `canary`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent |
+| `welcome`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent. Model checks arrive as normal `infer` jobs. |
 
 The agent sends its version as `user-agent: sublet-cli/<version>` on every
 request and as `agentVersion` in `hello`, so the server can refuse old agents
 before a protocol change. A handshake refused with HTTP `401`/`403` is treated
 like a rejected host key.
 
-`loaded` is followed by the server's canary. The server starts the booking
-timer only after a passing canary; the CLI displays the timer it receives in
-the `booking` frame. The agent never trusts the host for billing: the central
+`loaded` is followed by the server's first model check. The server starts the
+booking timer only after that check, then sends `verified`; the CLI displays the
+timer it receives in the `booking` frame. The agent never trusts the host for billing: the central
 proxy counts the SSE chunks.
 
 ## Development
@@ -261,7 +265,7 @@ npm run e2e
 
 The e2e script signs up a fresh host, issues a key, drives the real tunnel, does
 a billed pay-per-token stream, creates and claims a 30-minute booking, verifies
-the timer starts after the canary, verifies booked tokens are not charged,
+the timer starts after the model check, verifies booked tokens are not charged,
 drops the tunnel, reconnects inside the grace window, verifies the same timer
 survives, and cancels the request. It uses simulation mode so it does not need
 a real 4GB+ model.
@@ -284,11 +288,14 @@ npx sublet-cli start
 
 This build was verified on a Windows machine with an RTX 4060:
 
-- `npm run typecheck`, `npm test` (40 tests), and `npm run build` pass.
-- `npm run e2e` passes ten checks against a live Sublet server: tunnel, billed
-  public stream, canary, booking timer, unlimited booked stream, jobs board,
+- `npm run typecheck`, `npm test`, and `npm run build` pass.
+- `npm run e2e` passes against a live Sublet server: tunnel, billed public
+  stream, model check, booking timer, unlimited booked stream, jobs board,
   process-kill crash recovery with the same timer, standalone `jobs` serving,
-  and escrow cleanup.
+  escrow cleanup, device login, and take + `start <code>`.
+- On Linux x64 (CPU), `sublet doctor --fix` installed the official llama.cpp
+  b12202 build, including its library link chains, and served SmolLM2 GGUFs.
+  Those runs measured the model-check thresholds.
 - `sublet doctor --fix` downloaded the official CUDA `llama-server` build
   (b12176), verified its published SHA-256, extracted it, and recorded the
   binary hash in `~/.sublet/bin/manifest.json`.

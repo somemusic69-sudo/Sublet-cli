@@ -15,14 +15,8 @@ export type WorkerJob = {
   model?: string;
 };
 
-export type CanaryJob = {
-  type: 'canary';
-  jobId: string;
-  prompt: string;
-  seed: number;
-  maxTokens: number;
-  temperature: number;
-};
+/** One generated token with its log probability and the top alternatives, as llama-server reports them. */
+export type TokenPosition = { t: string; l: number; top: Array<[string, number]> };
 
 export type LoadJob = {
   type: 'load';
@@ -36,7 +30,6 @@ export type LoadJob = {
 
 export type ServerMessage =
   | { type: 'welcome'; username?: string }
-  | CanaryJob
   | WorkerJob
   | LoadJob
   | { type: 'cancel'; jobId: string }

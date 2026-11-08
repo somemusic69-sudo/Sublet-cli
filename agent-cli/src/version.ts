@@ -1,5 +1,5 @@
 export const BRAND = 'Sublet';
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 export const AGENT_NAME = 'sublet-cli';
 export const USER_AGENT = `${AGENT_NAME}/${VERSION}`;
 export const DEFAULT_SERVER = process.env.SUBLET_SERVER || 'http://127.0.0.1:8787';

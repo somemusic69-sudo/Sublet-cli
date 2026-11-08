@@ -4,7 +4,7 @@ import { BRAND, VERSION } from '../version.js';
 export type DashboardStatus = 'starting' | 'online' | 'working' | 'reconnecting' | 'offline' | 'auth-failed' | 'outdated' | 'paused';
 
 export type DashboardJob = {
-  kind: 'request' | 'public' | 'canary';
+  kind: 'request' | 'public';
   id?: string | null;
   model?: string | null;
   verified?: boolean;
@@ -104,7 +104,6 @@ function thermalLine(state: DashboardState): string {
 function jobLine(state: DashboardState): string {
   const job = state.job;
   if (!job) return 'Standby - waiting for a web request';
-  if (job.kind === 'canary') return 'Canary handshake (temp=0)';
   if (job.kind === 'public') return `Public pay-per-token${job.model ? ` · ${modelShortName(job.model)}` : ''}`;
   return `Dedicated Buyer Request${job.id ? ` (#${job.id.replace(/^req_/, '').slice(0, 12)})` : ''}`;
 }
