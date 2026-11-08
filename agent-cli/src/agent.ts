@@ -10,10 +10,10 @@ import { ensureLlamaServer, type LlamaInstall } from './engine/binaryManager.js'
 import { downloadModel, listCachedModels, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
 import { checkModelUrl, estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
 import { LlamaRunner } from './engine/llamaRunner.js';
-import { canarySimulation, runCanary, simulateChat, streamChat } from './network/streamProxy.js';
+import { simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
 import { TerminalDashboard, initialState, type DashboardJob, type DashboardState, type DashboardStatus } from './ui/terminalDashboard.js';
-import type { AgentMe, CachedModelInfo, ChatMessage, HeartbeatPayload, HelloPayload, LoadJob, ServerMessage } from './types.js';
+import type { AgentMe, CachedModelInfo, ChatMessage, HeartbeatPayload, HelloPayload, LoadJob, ServerMessage, TokenPosition } from './types.js';
 import { fetchJson, HttpError } from './util/http.js';
 import { execFile, sleep } from './util/exec.js';
 import { formatPercent, formatUsdNanos, modelShortName } from './util/format.js';
@@ -72,6 +72,19 @@ type ActiveJob = {
   requestId: string | null;
 };
 
+/** Aborts when any of the signals aborts (AbortSignal.any needs Node 20.3). */
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+}
+
 function simulatedGpu(override: GpuOverride | null): GpuSnapshot {
   const empty: GpuSnapshot = { gpus: [], primary: null, source: 'simulation', platform: process.platform, checkedAt: Date.now(), warnings: [] };
   if (!override) return { ...empty, warnings: ['Simulation mode: no GPU was scanned.'] };
@@ -98,6 +111,8 @@ export class Agent extends EventEmitter {
   private activeJobs = new Map<string, ActiveJob>();
   private stopped = false;
   private readonly startup = new AbortController();
+  /** Aborts the download of a request the server stopped (released, cancelled, or taken back). */
+  private loadAbort: { requestId: string; controller: AbortController } | null = null;
   private bookingWake = false;
   private loadingModel = false;
   private meInitialWallet: number | null = null;
@@ -402,7 +417,7 @@ export class Agent extends EventEmitter {
     });
   }
 
-  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null }): Promise<AgentModel> {
+  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal }): Promise<AgentModel> {
     if (this.options.simulation) {
       const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublet-simulator.gguf';
       const paramB = paramBFromName(file) || 7;
@@ -440,7 +455,7 @@ export class Agent extends EventEmitter {
           this.dashboard.update({ message: progress.note });
         },
         showProgress: true,
-        signal: this.startup.signal,
+        signal: opts.signal ? anySignal([this.startup.signal, opts.signal]) : this.startup.signal,
       });
       await this.refreshCachedModels();
     } else {
@@ -601,9 +616,6 @@ export class Agent extends EventEmitter {
         this.dashboard.update({ status: 'online' });
         this.emit('welcome');
         return;
-      case 'canary':
-        await this.handleCanary(message as unknown as Record<string, unknown>);
-        return;
       case 'infer':
         await this.handleInfer(message as unknown as Record<string, unknown>);
         return;
@@ -616,7 +628,7 @@ export class Agent extends EventEmitter {
         return;
       }
       case 'verified':
-        this.dashboard.update({ job: this.dashboard.current.job ? { ...this.dashboard.current.job, verified: true } : null, message: 'Canary verified. Clock can start.' });
+        this.dashboard.update({ job: this.dashboard.current.job ? { ...this.dashboard.current.job, verified: true } : null, message: 'Model check passed. The clock can start.' });
         return;
       case 'booking':
         this.applyBooking(message as unknown as Record<string, unknown>);
@@ -628,6 +640,10 @@ export class Agent extends EventEmitter {
         this.loadingModel = false;
         this.clearPersistedBooking();
         void this.releaseWakeLockIfIdle();
+        if (this.loadAbort?.requestId === requestId) {
+          this.loadAbort.controller.abort(new Error(`Request ${requestId} stopped: ${reason}`));
+          this.loadAbort = null;
+        }
         const current = this.dashboard.current.job;
         const mine = current?.kind === 'request' && current.id === requestId;
         if (mine) this.dashboard.update({ job: null });
@@ -693,39 +709,6 @@ export class Agent extends EventEmitter {
     }
   }
 
-  private async handleCanary(message: Record<string, unknown>): Promise<void> {
-    const jobId = String(message.jobId || '');
-    const previous = this.dashboard.current.job;
-    this.dashboard.update({ job: { kind: 'canary', id: null, model: this.model?.file || null }, status: 'working' });
-    try {
-      let result: { tokens: string[]; logprobs: number[] };
-      if (this.options.simulation) {
-        result = canarySimulation();
-      } else if (this.runner?.status === 'ready') {
-        result = await runCanary(this.runner.url, String(message.prompt || 'The capital of France is'));
-      } else {
-        throw new Error('llama-server is not ready for the canary');
-      }
-      this.tunnel?.send({
-        type: 'done',
-        jobId,
-        finishReason: 'stop',
-        promptTokens: 5,
-        completionTokens: result.tokens.length,
-        tokens: result.tokens,
-        logprobs: result.logprobs,
-      });
-      this.dashboard.update({ message: 'Canary answered. Waiting for VERIFIED.' });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.tunnel?.send({ type: 'error', jobId, code: 'canary_failed', message: msg });
-      this.logger.warn('Canary failed', { error: msg });
-      this.dashboard.update({ message: `Canary failed: ${msg}` });
-    } finally {
-      this.dashboard.update({ job: previous, status: previous?.timerEndsAt ? 'working' : 'online' });
-    }
-  }
-
   private async handleInfer(message: Record<string, unknown>): Promise<void> {
     const jobId = String(message.jobId || '');
     if (!jobId) return;
@@ -754,12 +737,13 @@ export class Agent extends EventEmitter {
         : { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 },
       message: null,
     });
-    const onChunk = (text: string) => {
+    const onChunk = (text: string, positions: TokenPosition[]) => {
       if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
       active.text += text;
       active.chunks++;
+      const frame = positions.length ? { type: 'chunk', jobId, text, lp: positions } : { type: 'chunk', jobId, text };
       // A chunk lost to a tunnel drop would leave a hole in the buyer's text, so stop the job instead.
-      if (!this.tunnel?.send({ type: 'chunk', jobId, text })) controller.abort(new Error('Tunnel dropped during the stream'));
+      if (!this.tunnel?.send(frame)) controller.abort(new Error('Tunnel dropped during the stream'));
     };
     try {
       let result;
@@ -799,8 +783,6 @@ export class Agent extends EventEmitter {
         finishReason: result.finishReason,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
-        tokens: result.tokens,
-        logprobs: result.logprobs,
       });
       this.dashboard.update({
         liveTokPerSec: this.lastSpeed,
@@ -852,9 +834,13 @@ export class Agent extends EventEmitter {
       const context = Math.max(Number(load.context || this.options.context || 8192), 2048);
       // The server may only point at a HuggingFace download, never at a file or address on this machine.
       const url = checkModelUrl(String(load.url || ''));
+      this.loadAbort?.controller.abort(new Error('Another request replaced this download'));
+      const loadAbort = { requestId, controller: new AbortController() };
+      this.loadAbort = loadAbort;
       const model = await this.loadModel(url, {
         context,
         requestId,
+        signal: loadAbort.controller.signal,
         expectedSha: load.sha256,
         expectedLayers: load.layers,
         file: load.file,
@@ -873,7 +859,7 @@ export class Agent extends EventEmitter {
       this.dashboard.update({
         job: { kind: 'request', id: requestId, model: model.file, verified: true, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
         llamaStatus: this.runner?.status || 'simulation',
-        message: 'Loaded and hash-checked. Waiting for the canary handshake.',
+        message: 'Loaded and hash-checked. Waiting for the model check.',
       });
       this.persistCurrentBooking({ requestId, context, slots: 1 });
     } catch (error) {
@@ -885,6 +871,8 @@ export class Agent extends EventEmitter {
       this.tunnel?.send({ type: 'load_failed', requestId, message });
       this.logger.error('Request load failed', { error: message });
       this.dashboard.update({ status: 'online', job: null, message: `Load failed: ${message}`, wakeLock: false });
+    } finally {
+      if (this.loadAbort?.requestId === requestId) this.loadAbort = null;
     }
   }
 

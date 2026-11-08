@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import test from 'node:test';
-import { runCanary, SseParser, streamChat } from '../src/network/streamProxy.js';
+import { PROBED_POSITIONS, SseParser, simulateChat, streamChat } from '../src/network/streamProxy.js';
 
 test('the SSE parser survives arbitrary chunk boundaries', () => {
   const parser = new SseParser();
@@ -48,26 +48,56 @@ test('streamChat pipes deltas, usage, and finish reason', async () => {
   }
 });
 
-test('canary collects deterministic tokens and logprobs', async () => {
-  const server = createServer((_req, res) => {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      choices: [{
-        message: { content: 'Paris' },
-        logprobs: { content: [{ token: 'Paris', logprob: -0.01 }] },
-      }],
-    }));
+test('every job asks llama-server for token probabilities and sends them with the first positions only', async () => {
+  let request: Record<string, unknown> = {};
+  const entry = (token: string, logprob: number) => ({
+    id: 1, token, bytes: [], logprob,
+    top_logprobs: [{ token, logprob }, { token: ' x', logprob: -2.5 }, { token: ' y', logprob: -3.1 }],
+  });
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      request = JSON.parse(body) as Record<string, unknown>;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"role":"assistant","content":null}}]}\n\n');
+      for (let i = 0; i < PROBED_POSITIONS + 3; i++) {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ` w${i}` }, logprobs: { content: [entry(` w${i}`, -0.1 * (i % 5))] } }] })}\n\n`);
+      }
+      res.end('data: [DONE]\n\n');
+    });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
-    const result = await runCanary(`http://127.0.0.1:${port}`, 'The capital of France is');
-    assert.deepEqual(result.tokens, ['Paris']);
-    assert.deepEqual(result.logprobs, [-0.01]);
+    const chunks: Array<[string, number]> = [];
+    const firsts: unknown[] = [];
+    await streamChat(`http://127.0.0.1:${port}`, { jobId: 'j', messages: [{ role: 'user', content: 'hi' }], maxTokens: 64, temperature: 0.7 }, {
+      onChunk: (text, positions) => {
+        chunks.push([text, positions.length]);
+        if (positions.length) firsts.push(positions[0]);
+      },
+    });
+    assert.equal(request.logprobs, true);
+    assert.equal(request.top_logprobs, 5);
+    assert.equal(chunks.length, PROBED_POSITIONS + 3);
+    assert.equal(chunks.filter(([, n]) => n === 1).length, PROBED_POSITIONS);
+    assert.deepEqual(chunks.slice(PROBED_POSITIONS).map(([, n]) => n), [0, 0, 0]);
+    assert.deepEqual(firsts[1], { t: ' w1', l: -0.1, top: [[' w1', -0.1], [' x', -2.5], [' y', -3.1]] });
   } finally {
     (server as Server).close();
   }
+});
+
+test('simulated jobs carry stand-in probabilities in the same shape', async () => {
+  const seen: number[] = [];
+  await simulateChat({ jobId: 'j', messages: [{ role: 'user', content: 'hello there' }], maxTokens: 64, temperature: 0.7 }, {
+    tokPerSec: 1_000,
+    onChunk: (_text, positions) => seen.push(positions.length),
+  });
+  assert.ok(seen.length > 3);
+  assert.ok(seen.every((n, i) => n === (i < PROBED_POSITIONS ? 1 : 0)));
 });
 
 test('a job cancelled before the stream starts never reaches llama-server', async () => {

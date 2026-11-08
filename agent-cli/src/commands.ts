@@ -576,7 +576,7 @@ async function claimRequest(cfg: AgentConfig, requestId: string, quiet = false):
     });
     if (!quiet) {
       output.write(`Claimed ${requestId}${result.status ? ` (${result.status})` : ''}.\n`);
-      output.write('The running `sublet start` agent will download and verify the model, then the server starts the clock after the canary.\n');
+      output.write('The running `sublet start` agent will download and verify the model, then the server starts the clock after the model check.\n');
     }
     return result;
   } catch (error) {

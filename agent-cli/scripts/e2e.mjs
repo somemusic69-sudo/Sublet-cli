@@ -3,7 +3,7 @@
  * End-to-end proof for the terminal agent against a running Sublet server.
  *
  * It uses simulation mode so no GPU or multi-GB GGUF is required. The tunnel,
- * canary, billing, streaming, booking timer, reconnect grace, and CLI commands
+ * model check, billing, streaming, booking timer, reconnect grace, and CLI commands
  * are all the real production paths.
  *
  * Run: npm run build && npm run e2e
@@ -216,11 +216,11 @@ try {
   const active = await waitFor(async () => {
     const result = await api('/api/agent/me', { headers: { authorization: `Bearer ${token}` } });
     return result.body.activeRequest?.id === request.id && result.body.activeRequest.timerStartedAt ? result.body.activeRequest : null;
-  }, 20_000, 'the canary and booking timer');
+  }, 20_000, 'the model check and booking timer');
   assert(active.status === 'active', `booking did not become active: ${active.status}`);
   const startedAt = active.timerStartedAt;
   assert(startedAt > 0 && active.timerEndsAt > startedAt, 'timer window is invalid');
-  log('canary + timer', `request ${request.id} timer started after verification`);
+  log('model check + timer', `request ${request.id} timer started after the first model check`);
 
   const bookedChat = await sseChat(`/r/${request.id}/v1/chat/completions`, 24);
   assert(bookedChat.final?.sublet?.charged === false, 'booked tokens were charged');
