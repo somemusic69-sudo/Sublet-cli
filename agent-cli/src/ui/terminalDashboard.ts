@@ -173,7 +173,7 @@ export function renderFrame(state: DashboardState, options: { width?: number; co
   add(`${title}`, `STATUS: ${statusText}`);
   lines.push(divider);
   add(`Host Endpoint : ${valueOrDash(state.endpoint)}`);
-  add(`Reliability   : ${state.reliability != null ? formatPercent(state.reliability) : '-'}${state.held ? '  (HELD - under 90%)' : state.reliability != null ? '  (safe - auto-ban < 90.0%)' : ''}`);
+  add(`Reliability   : ${state.reliability != null ? formatPercent(state.reliability) : '-'}${state.held ? '  (HELD - see your host page)' : state.reliability != null ? '  (OK - hosts are held below 90%)' : ''}`);
   add(`GPU Detected  : ${truncate(gpuLine(state), inner - 20)}`);
   add(`GPU Temp/Power: ${thermalLine(state)}`);
   lines.push(divider);

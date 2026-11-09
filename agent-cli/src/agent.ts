@@ -964,7 +964,7 @@ export class Agent extends EventEmitter {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on('data', handler);
-    this.dashboard.update({ keyHint: 'W withdraw · C copy endpoint · L logs · ? help' });
+    this.dashboard.update({ keyHint: 'W host page · C copy endpoint · L logs · ? help' });
   }
 
   private async handleKey(key: string): Promise<void> {
@@ -973,9 +973,9 @@ export class Agent extends EventEmitter {
       return;
     }
     if (key === 'w' || key === 'W') {
-      const url = this.withdrawUrl();
+      const url = this.hostPageUrl();
       this.openExternal(url);
-      this.dashboard.update({ message: `Wallet / withdraw: ${url}` });
+      this.dashboard.update({ message: `Host page: ${url}` });
       return;
     }
     if (key === 'c' || key === 'C') {
@@ -990,12 +990,13 @@ export class Agent extends EventEmitter {
       return;
     }
     if (key === '?') {
-      this.dashboard.update({ message: 'W withdraw · C copy endpoint · L logs · Ctrl+C stop' });
+      this.dashboard.update({ message: 'W host page · C copy endpoint · L logs · Ctrl+C stop' });
     }
   }
 
-  private withdrawUrl(): string {
-    return `${this.options.config.server.replace(/\/+$/, '')}/wallet`;
+  /** The website page with this host's earnings, reliability, and current request. */
+  private hostPageUrl(): string {
+    return `${this.options.config.server.replace(/\/+$/, '')}/host`;
   }
 
   private openExternal(url: string): void {

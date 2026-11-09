@@ -38,7 +38,7 @@ test('the dashboard frame shows the fields a host needs overnight', () => {
   state.lastHeartbeatAt = Date.now();
   state.showLogs = true;
   state.logTail = ['llama-server loaded', 'slot released'];
-  state.keyHint = 'W withdraw · C copy endpoint · L logs · ? help';
+  state.keyHint = 'W host page · C copy endpoint · L logs · ? help';
   const frame = renderFrame(state, { width: 72, color: false });
   assert.ok(frame.includes(`Sublet GPU TERMINAL AGENT v${VERSION}`));
   assert.match(frame, /STATUS: .*WORKING/);
@@ -51,7 +51,7 @@ test('the dashboard frame shows the fields a host needs overnight', () => {
   assert.match(frame, /38\.4 tok\/s/);
   assert.match(frame, /Session Earn\. : \$4\.68/);
   assert.match(frame, /Total Wallet\s+: \$42\.15/);
-  assert.match(frame, /Keys\s+: W withdraw/);
+  assert.match(frame, /Keys\s+: W host page/);
   assert.match(frame, /llama-server loaded/);
   const lines = frame.split('\n');
   assert.ok(lines.length >= 15);
