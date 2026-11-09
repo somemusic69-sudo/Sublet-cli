@@ -7,7 +7,7 @@ import { Agent } from './agent.js';
 import { apiUrl, configPath, subletHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
 import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION, compareVersions } from './version.js';
 import type { Logger } from './logger.js';
-import { GpuMonitor, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
+import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
 import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
 import { ensureLlamaServer, findExistingLlama, variantFor } from './engine/binaryManager.js';
@@ -239,7 +239,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   }
 
   const monitor = new GpuMonitor();
-  const gpu = await monitor.scan(true);
+  const gpu = applyGpuOverride(await monitor.scan(true), gpuOverrideFrom(flags));
   if (gpu.primary) {
     const p = gpu.primary;
     checks.push(check('GPU', 'ok', `${p.name} · ${(p.totalVramMb / 1024).toFixed(1)} GB total · ${(p.freeVramMb / 1024).toFixed(1)} GB free${p.temperatureC != null ? ` · ${p.temperatureC.toFixed(0)}C` : ''}`));
@@ -424,7 +424,7 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
 export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<number> {
   const cfg = await readyConfig(flags, logger);
   const monitor = new GpuMonitor();
-  const gpu = await monitor.scan(true);
+  const gpu = applyGpuOverride(await monitor.scan(true), gpuOverrideFrom(flags));
   const requests = await loadRequests(cfg, logger);
   if (flags.json && !flags.claim) {
     output.write(`${JSON.stringify(requests, null, 2)}\n`);
