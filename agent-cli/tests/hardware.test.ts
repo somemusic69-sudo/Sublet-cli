@@ -51,6 +51,7 @@ test('VRAM fit check reserves a small safety margin', () => {
   assert.equal(checkFit(6000, gpu).ok, true);
   assert.equal(checkFit(7000, gpu).ok, false);
   assert.equal(checkFit(100, null).ok, false);
+  assert.equal(checkFit(6000, { ...gpu, totalVramMb: 0, freeVramMb: 0 }).ok, true, 'an unknown VRAM size does not refuse every model');
   assert.equal(choosePrimary([gpu])?.name, gpu.name);
 });
 

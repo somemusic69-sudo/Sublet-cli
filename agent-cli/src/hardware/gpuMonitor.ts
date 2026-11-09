@@ -171,6 +171,9 @@ export function checkFit(needsMb: number, gpu: GpuStats | null, safetyRatio = 0.
   if (!gpu) {
     return { ok: false, reason: 'No GPU detected', freeMb: 0, needsMb, headroomMb: -needsMb };
   }
+  // Some cards are found without a memory size (for example through lspci only). Unknown is not "0 GB free";
+  // the load itself shows whether the model fits, and --vram can set the size.
+  if (gpu.totalVramMb <= 0) return { ok: true, reason: 'VRAM size unknown', freeMb: 0, needsMb, headroomMb: 0 };
   const budget = gpu.freeVramMb;
   const overhead = Math.max(256, Math.round(needsMb * safetyRatio));
   const required = needsMb + overhead;
