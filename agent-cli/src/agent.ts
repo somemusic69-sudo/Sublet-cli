@@ -656,7 +656,7 @@ export class Agent extends EventEmitter {
         const current = this.dashboard.current.job;
         const mine = current?.kind === 'request' && current.id === requestId;
         if (mine) this.dashboard.update({ job: null });
-        this.dashboard.update({ message: `Request ${requestId || '?'} stopped: ${reason}`, wakeLock: false });
+        this.dashboard.update({ message: requestId.startsWith('bench_') ? reason : `Request ${requestId || '?'} stopped: ${reason}`, wakeLock: false });
         this.emit('rejected', { requestId, reason, wasActive: mine && Boolean(current.timerEndsAt) });
         return;
       }
@@ -837,7 +837,7 @@ export class Agent extends EventEmitter {
       status: 'working',
       wakeLock: this.sleepGuard.status().active,
       job: { kind: 'request', id: requestId, model: load.file || load.url, verified: false, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
-      message: 'Pulling the requested GGUF',
+      message: requestId.startsWith('bench_') ? 'Loading a model for the benchmark' : 'Pulling the requested GGUF',
     });
     try {
       this.tunnel?.send({ type: 'progress', requestId, note: 'Starting download' });

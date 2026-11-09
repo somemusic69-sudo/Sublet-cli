@@ -97,3 +97,11 @@ test('a disabled dashboard writes nothing even on a TTY', async () => {
   dashboard.stop();
   assert.deepEqual(writes, []);
 });
+
+test('a benchmark test load is shown as a benchmark, not as a buyer request', () => {
+  const state = initialState('http://127.0.0.1:8787');
+  state.job = { kind: 'request', id: 'bench_abc123', model: 'tiny.gguf', verified: false, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 };
+  const frame = renderFrame(state, { width: 72, color: false });
+  assert.match(frame, /Benchmark: measuring this GPU/);
+  assert.doesNotMatch(frame, /Dedicated Buyer Request/);
+});
