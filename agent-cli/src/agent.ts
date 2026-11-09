@@ -810,9 +810,10 @@ export class Agent extends EventEmitter {
         const fallback: DashboardJob | null = this.options.publicMode
           ? { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 }
           : null;
+        const booked = current?.kind === 'request' && Boolean(current.timerEndsAt);
         this.dashboard.update({
-          status: 'online',
-          wakeLock: false,
+          status: booked ? 'working' : 'online',
+          wakeLock: this.sleepGuard.status().active,
           job: current?.kind === 'request' ? current : fallback,
         });
       }
