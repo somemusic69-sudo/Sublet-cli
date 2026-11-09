@@ -115,6 +115,8 @@ export class Agent extends EventEmitter {
   private loadAbort: { requestId: string; controller: AbortController } | null = null;
   private bookingWake = false;
   private loadingModel = false;
+  /** llama-server slots the current booking needs: more than one only for a shared booking. */
+  private bookingSlots = 1;
   private meInitialWallet: number | null = null;
   private lastSpeed: number | null = null;
   private lastTtft: number | null = null;
@@ -556,7 +558,7 @@ export class Agent extends EventEmitter {
 
   private runnerSlots(): number {
     if (this.options.publicMode) return Math.max(1, this.options.slots ?? 4);
-    return Math.max(1, this.options.slots ?? 1);
+    return Math.max(1, this.options.slots ?? 1, this.bookingSlots);
   }
 
   private helloPayload(): HelloPayload {
@@ -829,6 +831,7 @@ export class Agent extends EventEmitter {
   }
 
   private async handleLoad(load: LoadJob): Promise<void> {
+    this.bookingSlots = Math.max(1, Math.min(16, Math.round(Number(load.slots) || 1)));
     const requestId = String(load.requestId || '');
     this.loadingModel = true;
     this.bookingWake = true;
@@ -871,7 +874,7 @@ export class Agent extends EventEmitter {
         llamaStatus: this.runner?.status || 'simulation',
         message: 'Loaded and hash-checked. Waiting for the model check.',
       });
-      this.persistCurrentBooking({ requestId, context, slots: 1 });
+      this.persistCurrentBooking({ requestId, context, slots: this.bookingSlots });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.loadingModel = false;

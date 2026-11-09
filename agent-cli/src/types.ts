@@ -26,6 +26,8 @@ export type LoadJob = {
   sha256: string | null;
   layers: number | null;
   context: number;
+  /** Shared bookings: one llama-server slot for each buyer the host's benchmark allows. */
+  slots?: number;
 };
 
 export type ServerMessage =
