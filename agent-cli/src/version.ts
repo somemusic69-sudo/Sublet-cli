@@ -1,8 +1,8 @@
 export const BRAND = 'Sublet';
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 export const AGENT_NAME = 'sublet-cli';
 export const USER_AGENT = `${AGENT_NAME}/${VERSION}`;
-export const DEFAULT_SERVER = process.env.SUBLET_SERVER || 'http://127.0.0.1:8787';
+export const DEFAULT_SERVER = process.env.SUBLET_SERVER || 'https://sublet.duckdns.org';
 export const DEFAULT_WS_PATH = process.env.SUBLET_WS_PATH || '/tunnel';
 export const HEARTBEAT_MS = 5_000;
 export const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000, 30_000];

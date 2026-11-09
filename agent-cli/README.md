@@ -24,19 +24,21 @@ Postgres/SQLite ledger, wallet, reliability, request board
 
 ## Quick start
 
+You need Node.js 20 or newer (the LTS version from nodejs.org). On the GPU machine, run:
+
 ```bash
-# On the GPU machine
-npx sublet-cli login --server https://sublet.example.com
-npx sublet-cli doctor --fix
 npx sublet-cli start
 ```
 
-`login` shows a short code and opens the Sublet website. Click **Connect** there,
-and the CLI receives its own host key. On a machine without a browser (for example
-over SSH), open the printed link on any phone or laptop. `login --key sh_...`
-still works for scripts.
-`doctor --fix` scans the GPU and downloads the matching prebuilt `llama-server`
-(CUDA for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback).
+On the first run, `start` opens the Sublet website so you can connect this
+computer (click **Connect**), installs the matching `llama-server` build (CUDA
+for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback), and
+then waits for work. During the beta the default server is
+`https://sublet.duckdns.org`; `--server <url>` uses another Sublet server.
+
+`sublet doctor` checks the machine (`--fix` installs the engine ahead of time).
+`sublet login` connects the computer again; on a machine without a browser,
+open the printed link on any phone or laptop, or use `login --key sh_...`.
 
 To serve one buyer request, pick it on the website's market. The board shows
 which requests fit your GPU and which models are already on your disk. Click

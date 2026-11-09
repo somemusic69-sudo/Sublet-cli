@@ -1,6 +1,6 @@
 {
   "name": "sublet-cli",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Sublet GPU host terminal agent: run llama.cpp, serve metered tokens, and survive overnight bookings.",
   "author": "Sublet contributors",
   "homepage": "https://github.com/somemusic69-sudo/Sublet-cli#readme",
