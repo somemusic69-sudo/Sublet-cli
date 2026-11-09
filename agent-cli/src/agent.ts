@@ -926,7 +926,7 @@ export class Agent extends EventEmitter {
         username: me.user.username,
         endpoint: await this.endpointFor(this.options.config),
         reliability: host?.uptimePct ?? null,
-        held: host?.status === 'held' || (host?.uptimePct != null && host.uptimePct < 90),
+        held: host?.status === 'held',
         walletNanos: me.wallet.availableNanos + me.wallet.pendingNanos,
         sessionGuaranteedNanos: job?.guaranteedNanos || this.dashboard.current.sessionGuaranteedNanos,
         sessionEarnedNanos: earned,
