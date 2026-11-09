@@ -138,7 +138,7 @@ agent-cli/
 │  Sublet GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Host Endpoint : https://alex.sublet.example.com/api/v1                        │
-│  Reliability   : 98.5%  (safe - auto-ban < 90.0%)                    │
+│  Reliability   : 98.5%  (OK - hosts are held below 90%)             │
 │  GPU Detected  : NVIDIA GeForce RTX 3090 (21.2 GB free / 24.0 GB)    │
 │  GPU Temp/Power: 61°C · 185W · Wake-Lock: ACTIVE - sleep blocked     │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -220,8 +220,8 @@ from zero rather than corrupting weights.
     network. A server `load` must be such a URL, never a local path. A download
     stops at its announced size (at most 64 GB) and does not start without
     enough free disk space. Only the unit tests can opt into localhost.
-12. **Dashboard controls.** In an interactive terminal: `W` opens the wallet /
-    withdraw page, `C` copies the host endpoint, `L` toggles the llama log tail,
+12. **Dashboard controls.** In an interactive terminal: `W` opens your host
+    page on the website, `C` copies the host endpoint, `L` toggles the llama log tail,
     and `?` shows the key help.
 
 ## Server contract
