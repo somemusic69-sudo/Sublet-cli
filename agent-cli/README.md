@@ -138,7 +138,7 @@ agent-cli/
 │  Sublet GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Host Endpoint : https://alex.sublet.example.com/api/v1                        │
-│  Reliability   : 98.5%  (OK - hosts are held below 90%)             │
+│  Reliability   : 98.5%  (OK - held only after repeated failures)     │
 │  GPU Detected  : NVIDIA GeForce RTX 3090 (21.2 GB free / 24.0 GB)    │
 │  GPU Temp/Power: 61°C · 185W · Wake-Lock: ACTIVE - sleep blocked     │
 ├──────────────────────────────────────────────────────────────────────┤
