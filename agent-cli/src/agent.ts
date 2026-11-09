@@ -399,6 +399,7 @@ export class Agent extends EventEmitter {
         : await inspectHuggingFace(input).catch(() => null));
     const loaded = await this.loadModel(input, {
       context: this.options.context ?? 8192,
+      capContext: true,
       requestId: null,
       expectedSha: inspection?.sha256 ?? null,
       expectedLayers: inspection?.layers ?? null,
@@ -417,7 +418,7 @@ export class Agent extends EventEmitter {
     });
   }
 
-  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal }): Promise<AgentModel> {
+  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal; capContext?: boolean }): Promise<AgentModel> {
     if (this.options.simulation) {
       const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublet-simulator.gguf';
       const paramB = paramBFromName(file) || 7;
@@ -461,10 +462,18 @@ export class Agent extends EventEmitter {
     } else {
       loaded = await verifyModelFile(input, { sha256: opts.expectedSha ?? null, layers: opts.expectedLayers ?? null, context: opts.context, slots: this.runnerSlots() });
     }
+    // llama-server never gives a slot more context than the model was trained for, so check before starting it.
+    let context = opts.context;
+    if (loaded.contextTrain && loaded.contextTrain < context) {
+      const limit = `This model supports at most ${loaded.contextTrain} tokens of context`;
+      if (!opts.capContext) throw new Error(`${limit}, but ${context} were asked for. Ask for ${loaded.contextTrain} or less, or pick another model.`);
+      this.logger.warn(`${limit}; using ${loaded.contextTrain} instead of ${context}.`);
+      context = loaded.contextTrain;
+    }
     const needsMb = loaded.needsMb ?? estimateVramMb({
       paramB: loaded.paramB || 7,
       quant: loaded.quant || 'Q4_K_M',
-      context: opts.context,
+      context,
       layers: loaded.layers ?? undefined,
       slots: this.runnerSlots(),
     });
@@ -487,7 +496,7 @@ export class Agent extends EventEmitter {
       size: loaded.size,
       architecture: loaded.architecture,
     };
-    await this.ensureRunner(model, opts.context);
+    await this.ensureRunner(model, context);
     return model;
   }
 
@@ -801,9 +810,10 @@ export class Agent extends EventEmitter {
         const fallback: DashboardJob | null = this.options.publicMode
           ? { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 }
           : null;
+        const booked = current?.kind === 'request' && Boolean(current.timerEndsAt);
         this.dashboard.update({
-          status: 'online',
-          wakeLock: false,
+          status: booked ? 'working' : 'online',
+          wakeLock: this.sleepGuard.status().active,
           job: current?.kind === 'request' ? current : fallback,
         });
       }
