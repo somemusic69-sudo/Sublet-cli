@@ -105,6 +105,7 @@ function jobLine(state: DashboardState): string {
   const job = state.job;
   if (!job) return 'Standby - waiting for a web request';
   if (job.kind === 'public') return `Public pay-per-token${job.model ? ` · ${modelShortName(job.model)}` : ''}`;
+  if (job.id?.startsWith('bench_')) return 'Benchmark: measuring this GPU (no buyer)';
   return `Dedicated Buyer Request${job.id ? ` (#${job.id.replace(/^req_/, '').slice(0, 12)})` : ''}`;
 }
 
