@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import test from 'node:test';
-import { deviceLogin } from '../src/commands.js';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { deviceLogin, readyConfig } from '../src/commands.js';
+import { parseArgv } from '../src/index.js';
+import { Logger } from '../src/logger.js';
 
 type Handler = (url: string, body: Record<string, unknown>, res: ServerResponse) => void;
 
@@ -87,4 +92,33 @@ test('device login gives up when the code expires while it waits', async () => {
   }, async (base) => {
     await assert.rejects(deviceLogin(base, { name: 'pc', onCode: () => undefined }), /expired/);
   });
+});
+
+test('start connects a new computer first: it runs the device login and saves the key and the server', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-ready-'));
+  const previous = process.env.SUBLET_HOME;
+  process.env.SUBLET_HOME = home;
+  const quiet = new Logger({ level: 'silent' });
+  try {
+    await withServer((url, _body, res) => {
+      if (url === '/api/cli/login') res.end(JSON.stringify(code('http://x')));
+      else if (url === '/api/cli/login/poll') res.end(JSON.stringify({ status: 'approved', token: 'sh_new123456', username: 'ada' }));
+      else if (url === '/api/agent/me') res.end(JSON.stringify({ user: { id: 'u1', username: 'ada' }, wallet: { availableNanos: 0, pendingNanos: 0, escrowNanos: 0 }, host: null, activeRequest: null, serverNow: 0 }));
+      else {
+        res.statusCode = 404;
+        res.end('{}');
+      }
+    }, async (base) => {
+      const cfg = await readyConfig(parseArgv(['start', '--no-browser', '--server', base]).flags, quiet);
+      assert.equal(cfg.token, 'sh_new123456');
+      const saved = JSON.parse(await readFile(join(home, 'config.json'), 'utf8')) as { token: string; server: string };
+      assert.deepEqual([saved.token, saved.server], ['sh_new123456', base]);
+      const again = await readyConfig(parseArgv(['start']).flags, quiet);
+      assert.deepEqual([again.token, again.server], ['sh_new123456', base], 'later runs use the saved key and server');
+    });
+  } finally {
+    if (previous == null) delete process.env.SUBLET_HOME;
+    else process.env.SUBLET_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+  }
 });

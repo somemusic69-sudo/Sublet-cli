@@ -140,15 +140,7 @@ function announceLoginCode(code: DeviceLoginCode, flags: GlobalFlags): void {
   if (!flags.noBrowser && process.stdout.isTTY && canOpenBrowser()) openUrl(link);
 }
 
-export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<number> {
-  const existing = await readConfigFile();
-  const server = serverFor(flags, existing?.server);
-  let token = (flags.token || flags.positionals[0] || '').trim();
-  if (!token) {
-    const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
-    token = linked?.token ?? (await promptToken()).trim();
-  }
-  if (!token) throw new Error('Host key is empty');
+async function saveHostKey(server: string, token: string, flags: GlobalFlags): Promise<{ cfg: AgentConfig; me: AgentMe | null }> {
   const me = await verifyHostKey(server, token);
   const cfg: AgentConfig = {
     server,
@@ -158,12 +150,37 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
     tokenLabel: me?.user.username,
   };
   await writeConfigFile(cfg);
+  return { cfg, me };
+}
+
+/** start, host, and jobs connect this computer first when it has no host key, so a new host needs one command. */
+export async function readyConfig(flags: GlobalFlags, logger: Logger): Promise<AgentConfig> {
+  const cfg = await resolvedConfig(flags, false);
+  if (cfg.token) return cfg;
+  logger.info(`This computer is not connected to ${BRAND} yet. Connect it first.`);
+  const linked = await deviceLogin(cfg.server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
+  if (!linked) throw new Error('No host key. Run: sublet login, or pass --key <key>');
+  const { cfg: saved, me } = await saveHostKey(cfg.server, linked.token, flags);
+  logger.success(`Connected as @${me?.user.username || linked.username}`, { config: configPath() });
+  return { ...saved, wsPath: cfg.wsPath };
+}
+
+export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<number> {
+  const existing = await readConfigFile();
+  const server = serverFor(flags, existing?.server);
+  let token = (flags.token || flags.positionals[0] || '').trim();
+  if (!token) {
+    const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
+    token = linked?.token ?? (await promptToken()).trim();
+  }
+  if (!token) throw new Error('Host key is empty');
+  const { me } = await saveHostKey(server, token, flags);
   if (flags.json) {
     output.write(`${JSON.stringify({ ok: true, server, username: me?.user.username || null, config: configPath() })}\n`);
   } else {
     logger.success(`Saved host key for ${me?.user.username ? `@${me.user.username}` : 'this machine'}`, { config: configPath() });
     if (!me) logger.warn('The server does not expose /api/agent/me yet. The key is saved, but verify it with: sublet doctor');
-    output.write(`\n${BRAND} agent is configured. Next: sublet doctor, then sublet start\n`);
+    output.write(`\n${BRAND} agent is configured. Next: sublet start\n`);
   }
   return 0;
 }
@@ -285,7 +302,7 @@ async function listModels(): Promise<{ count: number; bytes: number }> {
 export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<number> {
   const requestId = flags.positionals[0] ?? null;
   if (requestId && !/^[A-Za-z0-9_-]{3,80}$/.test(requestId)) throw new Error(`"${requestId}" is not a request code. Copy the start command from the website.`);
-  const cfg = await resolvedConfig(flags, true);
+  const cfg = await readyConfig(flags, logger);
   if (requestId) logger.info(`Serving request ${requestId}. The agent stops when the booking ends.`);
   const agent = new Agent({
     requestId,
@@ -333,7 +350,7 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
       });
     }
   }
-  const cfg = await resolvedConfig(flags, true);
+  const cfg = await readyConfig(flags, logger);
   const agent = new Agent({
     config: cfg,
     logger,
@@ -405,7 +422,7 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
 }
 
 export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<number> {
-  const cfg = await resolvedConfig(flags, true);
+  const cfg = await readyConfig(flags, logger);
   const monitor = new GpuMonitor();
   const gpu = await monitor.scan(true);
   const requests = await loadRequests(cfg, logger);
@@ -633,7 +650,7 @@ export function globalHelp(): string {
     'Commands:',
     '  login                 Link this computer to your Sublet account (opens the website)',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
-    '  start [code]          Connect and serve; with a code from the website, serve that request',
+    '  start [code]          Connect and serve (connects this computer on the first run); with a code, serve that request',
     '  host <gguf>           Serve a public pay-per-token model',
     '  jobs                  Browse and claim buyer requests from the terminal',
     '  status                Show this host, wallet, and active booking',
@@ -641,7 +658,7 @@ export function globalHelp(): string {
     '',
     'Core options:',
     '  --key <key>           Host key (sh_...) instead of the saved key',
-    '  --server <url>        Central server (default: http://127.0.0.1:8787)',
+    `  --server <url>        Central server (default: ${DEFAULT_SERVER})`,
     '  --ws-path <path>      Tunnel path (default: /tunnel)',
     '  --simulation          Test the full pipe without a GPU or GGUF',
     '  --model <url|path>    Load a model on start',
