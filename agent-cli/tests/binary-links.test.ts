@@ -6,7 +6,22 @@ import test from 'node:test';
 import * as tar from 'tar';
 import { extractArchive } from '../src/engine/binaryManager.js';
 
-test('Linux and macOS archives with library link chains extract as plain files', async () => {
+// The fixtures need real symlinks; Windows allows them only in an admin terminal or with Developer Mode.
+async function canSymlink(): Promise<boolean> {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-symlink-'));
+  try {
+    await symlink('target', join(dir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const skip = (await canSymlink()) ? false : 'this computer cannot create symlinks (Windows needs Developer Mode or an admin terminal)';
+
+test('Linux and macOS archives with library link chains extract as plain files', { skip }, async () => {
   const work = await mkdtemp(join(tmpdir(), 'sublet-links-'));
   try {
     const src = join(work, 'src', 'llama-b1');
@@ -31,7 +46,7 @@ test('Linux and macOS archives with library link chains extract as plain files',
   }
 });
 
-test('an archive link that points outside the install folder is refused', async () => {
+test('an archive link that points outside the install folder is refused', { skip }, async () => {
   const work = await mkdtemp(join(tmpdir(), 'sublet-links-'));
   try {
     const src = join(work, 'src', 'pkg');
