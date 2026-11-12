@@ -161,3 +161,35 @@ test('`sublet start <code>` sends the code in hello and reports a reject for tha
     await server.close();
   }
 });
+
+test('a loaded model is not server-verified and stale verification/rejection cannot change the current request', async () => {
+  let socket: WebSocket | undefined;
+  const server = await fakeServer({ onSocket: (client) => { socket = client; } });
+  const agent = agentFor(server.url, true);
+  const running = agent.run();
+  const waitUntil = async (condition: () => boolean) => {
+    const until = Date.now() + 5_000;
+    while (!condition()) {
+      if (Date.now() >= until) throw new Error('Expected agent state was not reached');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+  try {
+    await agent.waitForOnline(5_000);
+    socket!.send(JSON.stringify({ type: 'load', requestId: 'r_current', url: 'https://huggingface.co/a/b/resolve/main/model.gguf', sha256: 'a'.repeat(64), file: 'model.gguf', layers: 4, context: 2048 }));
+    await waitUntil(() => server.frames.some((frame) => frame.type === 'loaded'));
+    assert.equal(agent.dashboardState.job?.verified, false);
+    socket!.send(JSON.stringify({ type: 'verified', requestId: 'r_old' }));
+    socket!.send(JSON.stringify({ type: 'reject', requestId: 'r_old', reason: 'Old booking' }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(agent.dashboardState.job?.id, 'r_current');
+    assert.equal(agent.dashboardState.job?.verified, false);
+    socket!.send(JSON.stringify({ type: 'verified', requestId: 'r_current' }));
+    await waitUntil(() => agent.dashboardState.job?.verified === true);
+    assert.equal(agent.dashboardState.job?.id, 'r_current');
+  } finally {
+    await agent.stop();
+    await running;
+    await server.close();
+  }
+});

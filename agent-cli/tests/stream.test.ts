@@ -3,6 +3,38 @@ import { createServer, type Server } from 'node:http';
 import test from 'node:test';
 import { PROBED_POSITIONS, SseParser, simulateChat, streamChat } from '../src/network/streamProxy.js';
 
+const streamJob = { jobId: 'j', messages: [], maxTokens: 8, temperature: 0 };
+const sseFetch = (body: string): typeof fetch => (async () => new Response(body)) as typeof fetch;
+
+test('truncated or malformed SSE cannot report successful completion', async () => {
+  for (const body of ['data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', 'data: not-json\n\ndata: [DONE]\n\n', 'data: null\n\ndata: [DONE]\n\n']) {
+    await assert.rejects(streamChat('http://localhost', streamJob, { fetchImpl: sseFetch(body) }), /stream|JSON/);
+  }
+});
+
+test('final unterminated SSE events use the same delta/error handling', async () => {
+  const result = await streamChat('http://localhost', streamJob, { fetchImpl: sseFetch('data: {"choices":[{"delta":{"content":"last"},"finish_reason":"length"}]}\n\ndata: [DONE]') });
+  assert.equal(result.text, 'last');
+  assert.equal(result.finishReason, 'length');
+  await assert.rejects(streamChat('http://localhost', streamJob, { fetchImpl: sseFetch('data: {"error":{"message":"final failure"}}') }), /final failure/);
+});
+
+test('malformed probability values are omitted rather than coerced into evidence', async () => {
+  const seen: unknown[] = [];
+  const content = [null, ...[null, '0', true, 1, -9999].map((logprob) => ({ token: 'bad', logprob })), { token: 'good', logprob: -0.2, top_logprobs: [null, { token: 'bad', logprob: null }, { token: 'good', logprob: -0.2 }] }];
+  await streamChat('http://localhost', streamJob, { fetchImpl: sseFetch(`data: ${JSON.stringify({ choices: [{ delta: { content: 'good' }, logprobs: { content } }] })}\n\ndata: [DONE]\n\n`), onChunk: (_text, positions) => seen.push(...positions) });
+  assert.deepEqual(seen, [{ t: 'good', l: -0.2, top: [['good', -0.2]] }]);
+});
+
+test('SSE buffers are bounded and early completion cancels the reader', async () => {
+  assert.throws(() => new SseParser().push('x'.repeat(2 * 1024 * 1024 + 1)), /limit/);
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); }, cancel() { cancelled = true; } });
+  await streamChat('http://localhost', streamJob, { fetchImpl: (async () => new Response(body)) as typeof fetch });
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
 test('the SSE parser survives arbitrary chunk boundaries', () => {
   const parser = new SseParser();
   const events: string[] = [];

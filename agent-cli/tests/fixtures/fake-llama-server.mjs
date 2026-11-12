@@ -37,10 +37,12 @@ const server = http.createServer(async (req, res) => {
     chatCount++;
     if (!stream) {
       const text = 'Paris';
+      // FAKE_DRIFT acts like an unstable GPU: the same prompt gets a different probability every time.
+      const logprob = process.env.FAKE_DRIFT ? -0.01 - chatCount : -0.01;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         id: 'fake', object: 'chat.completion', model: 'fake',
-        choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop', logprobs: { content: [{ token: 'Paris', logprob: -0.01 }] } }],
+        choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop', logprobs: { content: [{ token: 'Paris', logprob }] } }],
         usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
       }));
       return;

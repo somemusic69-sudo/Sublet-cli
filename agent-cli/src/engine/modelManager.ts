@@ -1,8 +1,8 @@
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, type BigIntStats } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { open, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { ensureDir, fileSize, freeDiskBytes, removeIfExists, sha256File } from '../util/fs.js';
+import { ensureDir, freeDiskBytes } from '../util/fs.js';
 import { formatBytes } from '../util/format.js';
 import { ProgressBar } from '../ui/progress.js';
 import {
@@ -42,6 +42,7 @@ export type LoadedModel = {
   contextTrain: number | null;
   architecture: string | null;
   needsMb: number | null;
+  /** A supplied expected SHA-256 matched measured file bytes; a computed digest alone is not verification. */
   verified: boolean;
 };
 
@@ -60,12 +61,81 @@ export type DownloadModelOptions = {
   slots?: number;
   /** Unit tests only: allow http(s) downloads from a loopback address. */
   allowLocalhost?: boolean;
+  /**
+   * Retained for caller compatibility. Cached files are always hashed before reporting their
+   * SHA-256, unless this process already hashed the same file identity and change timestamps.
+   */
+  verifyCached?: boolean;
 };
+
+/** Avoid repeated hashes of unchanged files. Stat identity detects ordinary changes, not a malicious local administrator. */
+const hashedThisRun = new Map<string, { identity: string; sha256: string }>();
+
+function fileIdentity(info: BigIntStats): string {
+  // Windows/libuv may return dev=0 for path stat but a volume ID for fstat. Inode and
+  // birth/change timestamps remain comparable; this cache is additionally keyed by path.
+  const dev = process.platform === 'win32' ? 0n : info.dev;
+  return [dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.birthtimeNs].join(':');
+}
+
+async function assertUnchanged(path: string, before: BigIntStats): Promise<void> {
+  if (fileIdentity(await stat(path, { bigint: true })) !== fileIdentity(before)) {
+    hashedThisRun.delete(path);
+    throw new Error(`The model file ${basename(path)} changed during verification; retry when it is no longer being modified`);
+  }
+}
+
+/** Never recursively delete a path supplied by cache state (it may now be a directory). */
+async function removeIfExists(path: string): Promise<void> {
+  try { await unlink(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function expectedHash(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)) throw new Error('Expected SHA-256 must be exactly 64 hexadecimal characters');
+  return value.toLowerCase();
+}
+
+/** Hash one open descriptor, never a path reopened after recording its identity. */
+async function hashModel(path: string, onProgress?: (bytes: number) => void): Promise<{ sha256: string; snapshot: BigIntStats }> {
+  const handle = await open(path, 'r');
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error(`Not a regular model file: ${basename(path)}`);
+    await assertUnchanged(path, before);
+    const hash = createHash('sha256');
+    let received = 0;
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      hash.update(chunk);
+      received += chunk.length;
+      onProgress?.(received);
+    }
+    const after = await handle.stat({ bigint: true });
+    if (fileIdentity(before) !== fileIdentity(after) || BigInt(received) !== before.size) {
+      throw new Error(`The model file ${basename(path)} changed during verification; retry when it is no longer being modified`);
+    }
+    await assertUnchanged(path, before);
+    return { sha256: hash.digest('hex'), snapshot: before };
+  } catch (error) {
+    hashedThisRun.delete(path);
+    throw error;
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Unit tests: behave like a new agent process that has hashed nothing yet. */
+export function forgetHashedModels(): void {
+  hashedThisRun.clear();
+}
 
 type Sidecar = {
   sha256: string;
   size: number;
   mtimeMs: number;
+  identity: string;
   checkedAt: number;
   info: Pick<GgufInfo, 'architecture' | 'layers' | 'paramB' | 'quantLabel' | 'contextTrain'>;
 };
@@ -98,8 +168,9 @@ async function readPartSource(part: string): Promise<string | null> {
   try {
     const data = JSON.parse(await readFile(partSourcePath(part), 'utf8')) as { url?: unknown };
     return typeof data?.url === 'string' ? data.url : null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
   }
 }
 
@@ -112,14 +183,16 @@ async function readSidecar(path: string): Promise<Sidecar | null> {
   try {
     const raw = await readFile(sidecarPath(path), 'utf8');
     const data = JSON.parse(raw) as Sidecar;
-    if (!data || typeof data.sha256 !== 'string' || typeof data.size !== 'number') return null;
+    if (!data || typeof data.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(data.sha256)
+        || !Number.isSafeInteger(data.size) || data.size <= 0 || !Number.isFinite(data.mtimeMs)
+        || typeof data.identity !== 'string') return null;
     return data;
   } catch {
     return null;
   }
 }
 
-/** Verified GGUF files on disk, by SHA-256, so the market can show "ready now" for matching requests. */
+/** Cache inventory hints, not proof of a hash check. downloadModel revalidates bytes before use. */
 export async function listCachedModels(cacheDir = modelsDir()): Promise<CachedModelInfo[]> {
   let entries;
   try {
@@ -131,20 +204,21 @@ export async function listCachedModels(cacheDir = modelsDir()): Promise<CachedMo
   for (const entry of entries) {
     if (!entry.isFile() || !/\.gguf$/i.test(entry.name)) continue;
     const path = join(cacheDir, entry.name);
-    const [sidecar, info] = await Promise.all([readSidecar(path), stat(path).catch(() => null)]);
-    if (!sidecar || !info || !/^[0-9a-f]{64}$/i.test(sidecar.sha256) || info.size !== sidecar.size) continue;
-    models.push({ sha256: sidecar.sha256.toLowerCase(), file: entry.name, sizeBytes: info.size });
+    const [sidecar, info] = await Promise.all([readSidecar(path), stat(path, { bigint: true }).catch(() => null)]);
+    if (!sidecar || !info?.isFile() || info.size !== BigInt(sidecar.size) || sidecar.identity !== fileIdentity(info)) continue;
+    models.push({ sha256: sidecar.sha256.toLowerCase(), file: entry.name, sizeBytes: Number(info.size) });
     if (models.length >= 200) break;
   }
   return models;
 }
 
-async function writeSidecar(path: string, sha256: string, info: GgufInfo, size: number): Promise<void> {
-  const infoStat = await stat(path);
+async function writeSidecar(path: string, sha256: string, info: GgufInfo, snapshot: BigIntStats): Promise<void> {
+  await assertUnchanged(path, snapshot);
   const data: Sidecar = {
     sha256,
-    size,
-    mtimeMs: infoStat.mtimeMs,
+    size: Number(snapshot.size),
+    mtimeMs: Number(snapshot.mtimeNs) / 1e6,
+    identity: fileIdentity(snapshot),
     checkedAt: Date.now(),
     info: {
       architecture: info.architecture,
@@ -155,6 +229,7 @@ async function writeSidecar(path: string, sha256: string, info: GgufInfo, size: 
     },
   };
   await writeFile(sidecarPath(path), JSON.stringify(data), 'utf8');
+  await assertUnchanged(path, snapshot);
 }
 
 function loadedFrom(path: string, url: string, sha: string, size: number, info: GgufInfo, verified: boolean, context: number, slots = 1): LoadedModel {
@@ -177,17 +252,16 @@ function loadedFrom(path: string, url: string, sha: string, size: number, info: 
   };
 }
 
-async function verifyHeader(path: string, expectedLayers: number | null | undefined, expectedSha: string, url: string, context: number, slots = 1): Promise<LoadedModel> {
+async function verifyHeader(path: string, expectedLayers: number | null | undefined): Promise<GgufInfo> {
   const info = await readGgufHeader(path);
   if (expectedLayers && info.layers && Math.abs(info.layers - expectedLayers) > 2) {
     throw new Error(`GGUF header has ${info.layers} layers, buyer asked for ${expectedLayers}`);
   }
-  const size = await fileSize(path);
-  await writeSidecar(path, expectedSha, info, size);
-  return loadedFrom(path, url, expectedSha, size, info, true, context, slots);
+  return info;
 }
 
 export async function downloadModel(options: DownloadModelOptions): Promise<LoadedModel> {
+  const expectedSha = expectedHash(options.expectedSha256);
   const url = checkModelUrl(options.url, { allowLocalhost: options.allowLocalhost });
   const cacheDir = options.cacheDir ?? modelsDir();
   await ensureDir(cacheDir);
@@ -201,39 +275,46 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   });
 
   if (await fileExists(dest)) {
-    const infoStat = await stat(dest);
-    const size = infoStat.size;
-    const cached = await readSidecar(dest);
-    const sameSize = cached?.size === size && Math.abs((cached?.mtimeMs || 0) - infoStat.mtimeMs) < 2;
-    if (sameSize && (!options.expectedSha256 || cached?.sha256 === options.expectedSha256.toLowerCase())) {
-      try {
-        const info = await readGgufHeader(dest);
-        const verified = Boolean(options.expectedSha256);
-        return loadedFrom(dest, url, cached?.sha256 || '', size, info, verified, context, slots);
-      } catch {
-        await removeIfExists(dest);
+    try {
+      let snapshot = await stat(dest, { bigint: true });
+      const size = Number(snapshot.size);
+      const seen = hashedThisRun.get(dest);
+      let actual: string;
+      if (seen?.identity === fileIdentity(snapshot)) {
+        actual = seen.sha256;
+      } else {
+        const note = `Verifying cached ${basename(dest)}`;
+        let lastNote = 0;
+        const report = (received: number) => {
+          const now = Date.now();
+          if (received < size && now - lastNote < 1_000) return;
+          lastNote = now;
+          emitProgress(options, { phase: 'verify', received, total: size, percent: size ? Math.min(100, (received / size) * 100) : null, speedBps: null, etaSeconds: null, note }, null);
+        };
+        report(0);
+        const hashed = await hashModel(dest, report);
+        actual = hashed.sha256;
+        snapshot = hashed.snapshot;
       }
-    } else {
-      // The sidecar may be missing or stale. Verify the existing weights before
-      // spending the host's bandwidth on another 20 GB download.
-      try {
-        const info = await readGgufHeader(dest);
-        const actual = await sha256File(dest);
-        if (options.expectedSha256 && actual.toLowerCase() !== options.expectedSha256.toLowerCase()) {
-          throw new Error(`SHA-256 mismatch for cached ${basename(dest)}`);
-        }
-        if (options.expectedLayers && info.layers && Math.abs(info.layers - options.expectedLayers) > 2) {
-          throw new Error(`GGUF has ${info.layers} layers, expected ${options.expectedLayers}`);
-        }
-        await writeSidecar(dest, actual, info, size);
-        return loadedFrom(dest, url, actual, size, info, Boolean(options.expectedSha256), context, slots);
-      } catch {
-        await removeIfExists(dest);
+      if (expectedSha && actual !== expectedSha) {
+        // A measured mismatch justifies fetching a replacement, not deleting the current file
+        // before that replacement succeeds. IO, header, callback, and sidecar errors never do.
+        hashedThisRun.delete(dest);
+        emitProgress(options, { phase: 'cache', received: 0, total: null, percent: null, speedBps: null, etaSeconds: null, note: `The cached ${basename(dest)} failed verification; downloading it again` }, null);
+      } else {
+        const info = await verifyHeader(dest, options.expectedLayers);
+        await assertUnchanged(dest, snapshot);
+        await writeSidecar(dest, actual, info, snapshot);
+        hashedThisRun.set(dest, { identity: fileIdentity(snapshot), sha256: actual });
+        return loadedFrom(dest, url, actual, Number(snapshot.size), info, Boolean(expectedSha), context, slots);
       }
+    } catch (error) {
+      hashedThisRun.delete(dest);
+      throw error;
     }
   }
 
-  let startAt = (await fileExists(part)) ? await fileSize(part) : 0;
+  let startAt = (await fileExists(part)) ? (await stat(part)).size : 0;
   if (startAt > 0 && await readPartSource(part) !== url) {
     await removeIfExists(part);
     startAt = 0;
@@ -246,14 +327,8 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   try {
     response = await fetchModel(headers);
   } catch (error) {
-    if (startAt > 0) {
-      // A stale partial should never wedge the download. Retry from zero once.
-      await removeIfExists(part);
-      startAt = 0;
-      response = await fetchModel({ 'user-agent': USER_AGENT });
-    } else {
-      throw new Error(`Download failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    // A transient network failure says nothing about the bytes already downloaded.
+    throw new Error(`Download failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   if (response.status === 416) {
@@ -269,9 +344,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     const contentRange = response.headers.get('content-range') || '';
     const match = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
     if (!match || Number(match[1]) !== startAt) {
-      await removeIfExists(part);
-      startAt = 0;
-      append = false;
+      await response.body.cancel().catch(() => undefined);
       throw new Error(`Server returned an invalid resume range: ${contentRange || 'missing'}`);
     }
     total = match[3] && match[3] !== '*' ? Number(match[3]) : total;
@@ -370,12 +443,14 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   bar?.done();
 
   const actual = hash.digest('hex');
-  if (options.expectedSha256 && actual.toLowerCase() !== options.expectedSha256.toLowerCase()) {
+  if (expectedSha && actual !== expectedSha) {
     await removeIfExists(part);
     await removeIfExists(partSourcePath(part));
-    await removeIfExists(dest);
-    throw new Error(`SHA-256 mismatch. Expected ${options.expectedSha256}, got ${actual}. The file was rejected.`);
+    throw new Error(`SHA-256 mismatch. Expected ${expectedSha}, got ${actual}. The file was rejected.`);
   }
+  if (total != null && received !== total) throw new Error(`Incomplete model download: expected ${total} bytes, received ${received}`);
+  // Reject bad headers before replacing any existing cache entry.
+  await verifyHeader(part, options.expectedLayers);
   await rename(part, dest);
   await removeIfExists(partSourcePath(part));
   emitProgress(options, {
@@ -387,7 +462,14 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     etaSeconds: 0,
     note: 'Verifying GGUF header',
   }, null);
-  const model = await verifyHeader(dest, options.expectedLayers, actual, url, context, slots);
+  // A stream hash measures incoming bytes, not necessarily the final file on disk. Reopen and
+  // hash one stable descriptor before associating the hash with its on-disk stat identity.
+  const hashed = await hashModel(dest);
+  if (hashed.sha256 !== actual) throw new Error(`The model file ${basename(dest)} changed during download verification`);
+  const info = await verifyHeader(dest, options.expectedLayers);
+  await assertUnchanged(dest, hashed.snapshot);
+  await writeSidecar(dest, hashed.sha256, info, hashed.snapshot);
+  const model = loadedFrom(dest, url, hashed.sha256, Number(hashed.snapshot.size), info, Boolean(expectedSha), context, slots);
   emitProgress(options, {
     phase: 'header',
     received,
@@ -395,22 +477,25 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     percent: 100,
     speedBps: null,
     etaSeconds: 0,
-    note: `Verified ${model.info.architecture || 'GGUF'} ${model.layers || '?'} layers`,
+    note: `Read ${model.info.architecture || 'GGUF'} header, ${model.layers || '?'} layers${expectedSha ? '; expected SHA-256 matched' : '; no expected SHA-256 supplied'}`,
   }, null);
+  await assertUnchanged(dest, hashed.snapshot);
+  hashedThisRun.set(dest, { identity: fileIdentity(hashed.snapshot), sha256: hashed.sha256 });
   return model;
 }
 
 export async function verifyModelFile(path: string, expected?: { sha256?: string | null; layers?: number | null; context?: number; slots?: number }): Promise<LoadedModel> {
-  const size = await fileSize(path);
-  const hash = await sha256File(path);
-  if (expected?.sha256 && hash.toLowerCase() !== expected.sha256.toLowerCase()) {
+  const expectedSha = expectedHash(expected?.sha256);
+  const { sha256: hash, snapshot } = await hashModel(path);
+  if (expectedSha && hash !== expectedSha) {
     throw new Error(`SHA-256 mismatch for ${basename(path)}`);
   }
   const info = await readGgufHeader(path);
   if (expected?.layers && info.layers && Math.abs(info.layers - expected.layers) > 2) {
     throw new Error(`GGUF has ${info.layers} layers, expected ${expected.layers}`);
   }
-  return loadedFrom(path, path, hash, size, info, Boolean(expected?.sha256), expected?.context ?? 8192, expected?.slots ?? 1);
+  await assertUnchanged(path, snapshot);
+  return loadedFrom(path, path, hash, Number(snapshot.size), info, Boolean(expectedSha), expected?.context ?? 8192, expected?.slots ?? 1);
 }
 
 export function cachedModelName(url: string): string {
@@ -422,8 +507,9 @@ async function fileExists(path: string): Promise<boolean> {
   try {
     const s = await stat(path);
     return s.isFile();
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
   }
 }
 

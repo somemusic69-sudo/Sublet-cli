@@ -1,7 +1,7 @@
-import { appendFile, chmod, mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import { createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { configPath, type AgentConfig } from '../config.js';
 
 export async function ensureDir(path: string, mode = 0o700): Promise<void> {
@@ -39,16 +39,32 @@ export async function freeDiskBytes(dir: string): Promise<number | null> {
   }
 }
 
+const pendingWrites = new Map<string, Promise<void>>();
+
+/** Serialize same-process writers; each replacement still uses a distinct, synced temporary file. */
 export async function atomicWrite(path: string, data: string, mode = 0o600): Promise<void> {
-  await ensureDir(dirname(path));
-  const tmp = `${path}.${process.pid}.tmp`;
-  await writeFile(tmp, data, { encoding: 'utf8', mode });
-  try {
-    await chmod(tmp, mode);
-  } catch {
-    /* windows */
+  const key = process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+  const previous = pendingWrites.get(key) ?? Promise.resolve();
+  const write = previous.catch(() => undefined).then(() => atomicReplace(path, data, mode));
+  pendingWrites.set(key, write);
+  try { await write; } finally {
+    if (pendingWrites.get(key) === write) pendingWrites.delete(key);
   }
-  await rename(tmp, path);
+}
+
+async function atomicReplace(path: string, data: string, mode: number): Promise<void> {
+  await ensureDir(dirname(path));
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const handle = await open(tmp, 'wx', mode);
+  try {
+    await handle.writeFile(data, 'utf8');
+    await handle.sync();
+    await handle.close();
+    await rename(tmp, path);
+  } finally {
+    await handle.close().catch(() => undefined);
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function readConfigFile(path = configPath()): Promise<AgentConfig | null> {

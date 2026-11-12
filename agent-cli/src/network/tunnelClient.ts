@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import WebSocket, { type RawData } from 'ws';
 import { RECONNECT_DELAYS_MS, HEARTBEAT_MS, UPGRADE_REQUIRED_CLOSE, USER_AGENT, outdatedMessage } from '../version.js';
 import { wsUrl as buildWsUrl } from '../config.js';
+import { websocketAgentFor } from './proxy.js';
 import type { HeartbeatPayload, HelloPayload, ServerMessage } from '../types.js';
 import type { Logger } from '../logger.js';
 
@@ -92,6 +93,10 @@ export class TunnelClient extends EventEmitter {
       socket = this.options.wsFactory ? this.options.wsFactory(url) : new WebSocket(url, {
         headers,
         handshakeTimeout: 15_000,
+        // A corporate HTTPS_PROXY is used for the tunnel too; undefined means a direct connection.
+        agent: websocketAgentFor(url),
+        // Server frames are small JSON messages; refuse anything absurd instead of buffering it.
+        maxPayload: 16 * 1024 * 1024,
       });
     } catch (error) {
       this.logger?.warn('Tunnel connection failed to start', { error: error instanceof Error ? error.message : String(error) });

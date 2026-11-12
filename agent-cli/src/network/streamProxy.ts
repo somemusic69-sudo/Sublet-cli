@@ -39,9 +39,11 @@ export type StreamOptions = {
 export class SseParser {
   private buffer = '';
   private dataLines: string[] = [];
+  private eventSize = 0;
 
   push(text: string): string[] {
     this.buffer += text;
+    if (this.buffer.length > 2 * 1024 * 1024) throw new Error('llama-server SSE buffer exceeds limit');
     const events: string[] = [];
     while (true) {
       const match = this.buffer.match(/\r?\n/);
@@ -52,11 +54,16 @@ export class SseParser {
         if (this.dataLines.length) {
           events.push(this.dataLines.join('\n'));
           this.dataLines = [];
+          this.eventSize = 0;
         }
         continue;
       }
       if (line.startsWith(':')) continue;
-      if (line.startsWith('data:')) this.dataLines.push(line.slice(5).trimStart());
+      if (line.startsWith('data:')) {
+        this.eventSize += line.length;
+        if (this.eventSize > 1024 * 1024) throw new Error('llama-server SSE event exceeds limit');
+        this.dataLines.push(line.slice(5).trimStart());
+      }
     }
     return events;
   }
@@ -68,6 +75,7 @@ export class SseParser {
     if (this.dataLines.length) {
       events.push(this.dataLines.join('\n'));
       this.dataLines = [];
+      this.eventSize = 0;
     }
     return events;
   }
@@ -84,17 +92,18 @@ function deltaContent(value: unknown): string {
 }
 
 function asNumber(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return typeof value === 'number' && Number.isFinite(value) && value <= 0 && value > -9999 ? value : null;
 }
 
 type LogprobEntry = { token?: unknown; logprob?: unknown; top_logprobs?: Array<{ token?: unknown; logprob?: unknown }> };
 
 function toPosition(entry: LogprobEntry): TokenPosition | null {
+  if (!entry || typeof entry !== 'object') return null;
   const l = asNumber(entry.logprob);
   if (typeof entry.token !== 'string' || l == null) return null;
   const top: Array<[string, number]> = [];
   for (const alt of Array.isArray(entry.top_logprobs) ? entry.top_logprobs.slice(0, TOP_ALTERNATIVES) : []) {
+    if (!alt || typeof alt !== 'object') continue;
     const value = asNumber(alt.logprob);
     if (typeof alt.token === 'string' && value != null) top.push([alt.token, value]);
   }
@@ -116,6 +125,8 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
   let chunkCount = 0;
   let probed = 0;
   let pending: TokenPosition[] = [];
+  let completed = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
   try {
     controller.signal.throwIfAborted();
@@ -140,26 +151,26 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
       throw new Error(`llama-server returned ${response.status}${body ? `: ${body.slice(0, 300)}` : ''}`);
     }
     const parser = new SseParser();
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const events = parser.push(decoder.decode(value, { stream: true }));
-      for (const event of events) {
-        if (event === '[DONE]') continue;
+    const consume = (event: string) => {
+        if (completed) return;
+        if (event === '[DONE]') { completed = true; return; }
         let json: Record<string, unknown>;
         try {
           json = JSON.parse(event) as Record<string, unknown>;
         } catch {
-          continue;
+          throw new Error('Malformed JSON in llama-server stream');
         }
+        if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('Invalid llama-server stream event');
         if (json.error) {
           const error = json.error as { message?: string } | string;
           throw new Error(typeof error === 'string' ? error : error.message || 'llama-server stream error');
         }
         const eventUsage = json.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null | undefined;
         if (eventUsage) {
+          const counts = [eventUsage.prompt_tokens, eventUsage.completion_tokens, eventUsage.total_tokens];
+          if (!counts.every((n) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0)) throw new Error('Invalid llama-server token usage');
           usage = {
             prompt_tokens: Number(eventUsage.prompt_tokens || 0),
             completion_tokens: Number(eventUsage.completion_tokens || 0),
@@ -168,6 +179,7 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
         }
         const choices = Array.isArray(json.choices) ? json.choices as Array<Record<string, unknown>> : [];
         for (const choice of choices) {
+          if (!choice || typeof choice !== 'object') throw new Error('Invalid llama-server choice');
           const delta = choice.delta && typeof choice.delta === 'object' ? choice.delta as Record<string, unknown> : {};
           const lp = choice.logprobs && typeof choice.logprobs === 'object' ? choice.logprobs as { content?: LogprobEntry[] } : null;
           for (const entry of Array.isArray(lp?.content) ? lp.content : []) {
@@ -179,6 +191,7 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
           }
           const piece = deltaContent(delta.content);
           if (piece) {
+            if (text.length + piece.length > 16 * 1024 * 1024) throw new Error('llama-server output exceeds limit');
             if (firstTokenAt == null) firstTokenAt = Date.now();
             text += piece;
             chunkCount++;
@@ -187,33 +200,37 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
           }
           if (typeof choice.finish_reason === 'string' && choice.finish_reason) finishReason = choice.finish_reason;
         }
+    };
+    while (!completed) {
+      controller.signal.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done) {
+        for (const event of parser.push(decoder.decode())) consume(event);
+        for (const event of parser.flush()) consume(event);
+        break;
       }
+      for (const event of parser.push(decoder.decode(value, { stream: true }))) consume(event);
     }
-    for (const event of parser.flush()) {
-      if (event === '[DONE]') continue;
-      try {
-        const json = JSON.parse(event) as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } };
-        if (json.usage) usage = {
-          prompt_tokens: Number(json.usage.prompt_tokens || 0),
-          completion_tokens: Number(json.usage.completion_tokens || 0),
-          total_tokens: Number(json.usage.total_tokens || 0),
-        };
-      } catch {
-        /* ignored */
-      }
-    }
+    controller.signal.throwIfAborted();
+    if (!completed) throw new Error('llama-server stream ended before [DONE]');
     const elapsed = Math.max(1, Date.now() - started);
-    const completion = usage?.completion_tokens || chunkCount;
+    // Events update usage inside consume(), which TypeScript cannot track here.
+    const finalUsage = usage as StreamResult['usage'];
+    const completion = finalUsage?.completion_tokens ?? chunkCount;
     return {
       text,
       finishReason,
-      promptTokens: usage?.prompt_tokens || 0,
+      promptTokens: finalUsage?.prompt_tokens ?? 0,
       completionTokens: completion,
-      usage,
+      usage: finalUsage,
       ttftMs: firstTokenAt ? firstTokenAt - started : null,
       tokPerSec: completion / (elapsed / 1000),
     };
   } finally {
+    if (reader) {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', onAbort);
   }

@@ -56,6 +56,25 @@ export function buildLlamaArgs(options: Pick<LlamaRunnerOptions, 'modelPath' | '
   return args;
 }
 
+/**
+ * llama-server reads its own settings from the environment: LLAMA_ARG_* (any flag, such as a
+ * chat template, a KV-cache type, or sampling defaults), LLAMA_LOG_* and LLAMA_API_KEY. A host
+ * who also uses llama.cpp privately may have these set. They must not reach the engine: buyers
+ * were promised the locked flags, the server's model checks expect them, an API key would lock
+ * the agent out of its own engine, and a log setting could write prompts to disk.
+ */
+export function engineEnv(base: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv = {}): { env: NodeJS.ProcessEnv; dropped: string[] } {
+  const env: NodeJS.ProcessEnv = {};
+  const dropped: string[] = [];
+  // Overrides are no more trusted than the inherited environment. Filter after merging so
+  // an explicit env option cannot reintroduce authentication, logging, or generation flags.
+  for (const [name, value] of Object.entries({ ...base, ...extra })) {
+    if (/^(LLAMA_ARG_|LLAMA_LOG_)/i.test(name) || /^LLAMA_API_KEY$/i.test(name)) dropped.push(name);
+    else env[name] = value;
+  }
+  return { env, dropped: dropped.sort() };
+}
+
 export async function findFreePort(host = '127.0.0.1'): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -132,8 +151,12 @@ export class LlamaRunner extends EventEmitter {
     const logFile = this.options.logFile ?? join(logsDir(), 'llama-server.log');
     this.logStream?.end();
     this.logStream = createWriteStream(logFile, { flags: 'a' });
+    const { env, dropped } = engineEnv(process.env, this.options.env);
+    if (dropped.length && this._restarts === 0) {
+      this.logger?.warn(`Ignoring your llama.cpp settings for this engine: ${dropped.join(', ')}. Sublet runs llama-server with fixed flags.`);
+    }
     const child = spawn(this.options.binaryPath, args, {
-      env: { ...process.env, ...this.options.env },
+      env,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

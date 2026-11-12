@@ -47,6 +47,8 @@ export function normalizeServer(raw: string): string {
   }
   const url = new URL(value);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Server must be an http(s) URL');
+  if (url.username || url.password) throw new Error('Server URL must not contain credentials; use --key or SUBLET_KEY');
+  if (url.search || url.hash) throw new Error('Server URL must not contain a query or fragment');
   const path = url.pathname.replace(/\/+$/, '');
   return `${url.origin}${path === '/' ? '' : path}`;
 }
@@ -61,6 +63,8 @@ export function wsUrl(server: string, token: string, wsPath = '/tunnel', mode: '
   const path = wsPath.trim() || '/tunnel';
   if (/^wss?:\/\//i.test(path)) {
     const full = new URL(path);
+    if (full.origin !== base.origin) throw new Error('Tunnel URL must use the same server origin; refusing to forward the host key');
+    if (full.username || full.password || full.hash) throw new Error('Tunnel URL must not contain credentials or a fragment');
     if (mode === 'query') full.searchParams.set('token', token);
     return full.toString();
   }

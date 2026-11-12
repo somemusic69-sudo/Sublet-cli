@@ -10,6 +10,7 @@ code is modified in this repository.
 | `adm-zip` | MIT | Extract official llama.cpp Windows ZIP releases |
 | `tar` | ISC | Extract official llama.cpp Linux/macOS tarballs |
 | `ws` | MIT | Outbound WebSocket tunnel and reconnect handling |
+| `undici` | MIT | HTTP(S) proxy support for downloads and API calls; loaded only when a proxy is set |
 
 ## Development dependencies
 

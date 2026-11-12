@@ -1,0 +1,89 @@
+name: Release
+
+# Publishing happens only here, never from a laptop. Push a tag that matches
+# agent-cli/package.json (for example v1.3.0) and this workflow verifies,
+# publishes to npm with provenance, and creates the GitHub release.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-cli/package-lock.json
+      - name: Tag matches package.json
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run check
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: agent-cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: agent-cli/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Publish with provenance
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          npm publish --provenance --access public --tag "$tag"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Software bill of materials
+        run: npm sbom --sbom-format cyclonedx --omit dev > "sublet-cli-${GITHUB_REF_NAME}.cdx.json"
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --title "sublet-cli $GITHUB_REF_NAME" \
+            --notes-file release-notes.md $prerelease "sublet-cli-${GITHUB_REF_NAME}.cdx.json"

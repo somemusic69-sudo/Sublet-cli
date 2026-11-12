@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { renameSync, writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { downloadModel, listCachedModels, modelPathFor, verifyModelFile } from '../src/engine/modelManager.js';
+import { downloadModel, forgetHashedModels, listCachedModels, modelPathFor, verifyModelFile } from '../src/engine/modelManager.js';
 import { BufferWriter, buildGgufSample, checkModelUrl, fetchModelUrl } from '../src/engine/gguf.js';
 
 const MODEL = buildGgufSample([
@@ -18,6 +19,221 @@ const MODEL = buildGgufSample([
 ]);
 
 const SHA = createHash('sha256').update(MODEL).digest('hex');
+const STUB_URL = 'https://huggingface.co/test/model/resolve/main/model.gguf';
+const modelFetch = (async () => new Response(new Uint8Array(MODEL), { headers: { 'content-length': String(MODEL.length) } })) as typeof fetch;
+
+test('a computed hash without an expected digest never becomes verified', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  try {
+    const options = { url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, showProgress: false };
+    const fresh = await downloadModel(options);
+    assert.deepEqual([fresh.sha256, fresh.verified], [SHA, false]);
+    const cached = await downloadModel(options);
+    assert.deepEqual([cached.sha256, cached.verified], [SHA, false]);
+    forgetHashedModels();
+    assert.equal((await downloadModel(options)).verified, false);
+    assert.equal((await verifyModelFile(fresh.path)).verified, false);
+    assert.equal((await downloadModel({ ...options, expectedSha256: SHA.toUpperCase() })).verified, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('malformed expected digests are rejected before any fetch', async () => {
+  for (const digest of ['', 'abc', 'z'.repeat(64), 42, true]) {
+    await assert.rejects(downloadModel({
+      url: STUB_URL, expectedSha256: digest as string,
+      fetchImpl: (async () => { throw new Error('must not fetch'); }) as typeof fetch,
+    }), /Expected SHA-256/);
+  }
+});
+
+test('replacing a memoized model with a same-sized inode invalidates the memo', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  try {
+    const options = { url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, showProgress: false };
+    const first = await downloadModel(options);
+    const before = await stat(first.path);
+    const replacement = Buffer.from(MODEL);
+    replacement[replacement.length - 1] = replacement[replacement.length - 1]! ^ 0xff;
+    const other = join(dir, 'replacement.gguf');
+    await writeFile(other, replacement);
+    await utimes(other, before.atime, before.mtime);
+    await rename(other, first.path);
+    const loaded = await downloadModel(options);
+    assert.equal(loaded.sha256, createHash('sha256').update(replacement).digest('hex'));
+    assert.notEqual(loaded.sha256, first.sha256);
+    assert.equal(loaded.verified, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('mutation while hashing rejects the observation without deleting the model', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  const replacement = Buffer.from(MODEL);
+  replacement[replacement.length - 1] = replacement[replacement.length - 1]! ^ 0xff;
+  try {
+    await writeFile(path, MODEL);
+    let mutated = false;
+    await assert.rejects(downloadModel({
+      url: STUB_URL, cacheDir: dir, expectedSha256: SHA, showProgress: false,
+      fetchImpl: (async () => { throw new Error('must not fetch'); }) as typeof fetch,
+      onProgress: (progress) => {
+        if (progress.phase === 'verify' && progress.received === MODEL.length && !mutated) {
+          mutated = true;
+          writeFileSync(path, replacement);
+        }
+      },
+    }), /changed during verification/);
+    assert.ok(mutated);
+    assert.deepEqual(await readFile(path), replacement);
+    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false });
+    assert.equal(loaded.sha256, createHash('sha256').update(replacement).digest('hex'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fresh download verification does not memoize a stream digest for changed disk bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  try {
+    await assert.rejects(downloadModel({
+      url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, expectedSha256: SHA, showProgress: false,
+      onProgress: (progress) => {
+        if (progress.phase === 'verify') writeFileSync(path, Buffer.concat([MODEL, Buffer.from('changed')]));
+      },
+    }), /changed during download verification/);
+    assert.equal((await stat(path)).size, MODEL.length + 7);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replacement of the path during hashing is not mistaken for the open descriptor', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  const replacementPath = join(dir, 'replacement.gguf');
+  const replacement = Buffer.concat([MODEL, Buffer.from('replacement')]);
+  try {
+    await writeFile(path, MODEL);
+    await writeFile(replacementPath, replacement);
+    await assert.rejects(downloadModel({
+      url: STUB_URL, cacheDir: dir, expectedSha256: SHA, showProgress: false,
+      onProgress: (progress) => {
+        if (progress.phase === 'verify' && progress.received === MODEL.length) {
+          // Windows permits moving the open original aside, but not replacing it in place.
+          renameSync(path, `${path}.old`);
+          renameSync(replacementPath, path);
+        }
+      },
+    }), /changed during verification/);
+    assert.deepEqual(await readFile(path), replacement);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('progress callback failures preserve the file and do not poison the hash memo', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  try {
+    await writeFile(path, MODEL);
+    await assert.rejects(downloadModel({
+      url: STUB_URL, cacheDir: dir, expectedSha256: SHA, showProgress: false,
+      onProgress: (progress) => { if (progress.received === MODEL.length) throw new Error('callback failed'); },
+    }), /callback failed/);
+    assert.deepEqual(await readFile(path), MODEL);
+    const notes: string[] = [];
+    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, showProgress: false, onProgress: (p) => notes.push(p.note) });
+    assert.equal(loaded.verified, true);
+    assert.ok(notes.some((note) => /Verifying cached/.test(note)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a syntactically valid forged sidecar digest is not reported as the measured digest', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  try {
+    const options = { url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, showProgress: false };
+    const first = await downloadModel(options);
+    const sidecar = JSON.parse(await readFile(`${first.path}.sublet.json`, 'utf8')) as Record<string, unknown>;
+    sidecar.sha256 = '0'.repeat(64);
+    await writeFile(`${first.path}.sublet.json`, JSON.stringify(sidecar));
+    forgetHashedModels();
+    const loaded = await downloadModel(options);
+    assert.deepEqual([loaded.sha256, loaded.verified], [SHA, false]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('sidecar IO and header validation errors preserve cached model bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  try {
+    await writeFile(path, MODEL);
+    await mkdir(`${path}.sublet.json`);
+    await writeFile(join(`${path}.sublet.json`, 'keep.txt'), 'keep');
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, showProgress: false }), /EISDIR|EPERM|EACCES/);
+    assert.deepEqual(await readFile(path), MODEL);
+    assert.equal(await readFile(join(`${path}.sublet.json`, 'keep.txt'), 'utf8'), 'keep');
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, expectedLayers: 80, showProgress: false }), /layers/);
+    assert.deepEqual(await readFile(path), MODEL);
+    const badHeader = Buffer.from('not a GGUF');
+    await writeFile(path, badHeader);
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false }), /GGUF/);
+    assert.deepEqual(await readFile(path), badHeader);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed replacement hash does not delete a pre-existing cached model', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const path = modelPathFor(STUB_URL, dir);
+  try {
+    await writeFile(path, MODEL);
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: '0'.repeat(64), fetchImpl: modelFetch, showProgress: false }), /SHA-256 mismatch/);
+    assert.deepEqual(await readFile(path), MODEL);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('network and partial-source IO failures preserve resumable bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const part = `${modelPathFor(STUB_URL, dir)}.part`;
+  const bytes = MODEL.subarray(0, 100);
+  try {
+    await writeFile(part, bytes);
+    await writeFile(`${part}.json`, JSON.stringify({ url: STUB_URL }));
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false, fetchImpl: (async () => { throw new Error('offline'); }) as typeof fetch }), /offline/);
+    assert.deepEqual(await readFile(part), bytes);
+    await rm(`${part}.json`);
+    await mkdir(`${part}.json`);
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false, fetchImpl: modelFetch }), /EISDIR|EPERM|EACCES/);
+    assert.deepEqual(await readFile(part), bytes);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cache cleanup never recursively deletes a directory at a partial-file path', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  const part = `${modelPathFor(STUB_URL, dir)}.part`;
+  try {
+    await mkdir(part);
+    await writeFile(join(part, 'keep.txt'), 'keep');
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, showProgress: false }), /EISDIR|EPERM|EACCES/);
+    assert.equal(await readFile(join(part, 'keep.txt'), 'utf8'), 'keep');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 async function withServer(handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): Promise<{ server: Server; url: string }> {
   const server = createServer(handler);
@@ -196,6 +412,56 @@ test('cached files are reused without another request', async () => {
   }
 });
 
+test('a served model is hashed from disk: a swapped cached file is caught and downloaded again', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
+  let requests = 0;
+  const { server, url } = await withServer((_req, res) => {
+    requests++;
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': MODEL.length });
+    res.end(MODEL);
+  });
+  const notes: string[] = [];
+  const serve = () => downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false, verifyCached: true, onProgress: (p) => notes.push(p.note) });
+  try {
+    forgetHashedModels();
+    const first = await serve();
+    assert.equal(requests, 1);
+
+    // The same agent run hashed these bytes while downloading them: no second hash, no second download.
+    notes.length = 0;
+    await serve();
+    assert.equal(requests, 1);
+    assert.ok(!notes.some((note) => /Verifying cached/.test(note)));
+
+    // A new agent run trusts nothing it has not hashed itself.
+    forgetHashedModels();
+    notes.length = 0;
+    const again = await serve();
+    assert.equal(requests, 1);
+    assert.ok(notes.some((note) => /Verifying cached/.test(note)));
+    assert.deepEqual([again.sha256, again.verified], [SHA, true]);
+
+    // Swap the weights for other bytes of the same size and put the modified time back, so the sidecar still "matches".
+    const before = await stat(first.path);
+    const swapped = Buffer.from(MODEL);
+    swapped[swapped.length - 1] = swapped[swapped.length - 1]! ^ 0xff;
+    await writeFile(first.path, swapped);
+    await utimes(first.path, before.atime, before.mtime);
+
+    // Even in this same process, ctime/identity invalidates the memo despite restored mtime.
+    // An expected hash is never trusted solely from a sidecar, including verifyCached=false.
+    notes.length = 0;
+    const healed = await downloadModel({ url, cacheDir: dir, allowLocalhost: true, expectedSha256: SHA, showProgress: false, verifyCached: false, onProgress: (p) => notes.push(p.note) });
+    assert.equal(requests, 2);
+    assert.ok(notes.some((note) => /failed verification/.test(note)));
+    assert.equal(healed.sha256, SHA);
+    assert.deepEqual(await readFile(first.path), MODEL);
+  } finally {
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('remote model downloads must be https', async () => {
   await assert.rejects(
     downloadModel({ url: 'http://example.com/model.gguf', showProgress: false }),
@@ -279,7 +545,7 @@ test('a download that streams past the expected size is cut off and removed', as
   }
 });
 
-test('cached models are listed by SHA-256 only when the file still matches its sidecar', async () => {
+test('cached model inventory hints require matching sidecar stat identity', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sublet-cache-'));
   try {
     const { server, url } = await withServer((_req, res) => {
@@ -295,7 +561,11 @@ test('cached models are listed by SHA-256 only when the file still matches its s
     await writeFile(join(dir, 'no-sidecar.gguf'), MODEL);
     const listed = await listCachedModels(dir);
     assert.deepEqual(listed, [{ sha256: SHA, file: 'model.gguf', sizeBytes: MODEL.length }]);
-    await writeFile(join(dir, 'model.gguf'), Buffer.concat([MODEL, Buffer.from('changed')]));
+    const before = await stat(join(dir, 'model.gguf'));
+    const changed = Buffer.from(MODEL);
+    changed[changed.length - 1] = changed[changed.length - 1]! ^ 0xff;
+    await writeFile(join(dir, 'model.gguf'), changed);
+    await utimes(join(dir, 'model.gguf'), before.atime, before.mtime);
     assert.deepEqual(await listCachedModels(dir), []);
     assert.deepEqual(await listCachedModels(join(dir, 'missing')), []);
   } finally {

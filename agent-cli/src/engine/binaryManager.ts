@@ -372,7 +372,12 @@ export async function findExistingLlama(options: InstallOptions = {}): Promise<L
 export async function ensureLlamaServer(options: InstallOptions & { fix?: boolean; simulation?: boolean } = {}): Promise<EnsureResult> {
   if (options.simulation) return { found: false, reason: 'Simulation mode: llama-server is not needed.' };
   const existing = await findExistingLlama(options);
-  if (existing) return { found: true, install: existing };
+  if (existing) {
+    if (!options.requireChecksum || existing.verified) return { found: true, install: existing };
+    if (!options.fix || existing.source === 'env' || existing.source === 'path') {
+      return { found: false, reason: 'The existing llama-server has no verified release checksum; --require-checksum refuses it. Remove custom LLAMA_SERVER/PATH overrides and run sublet doctor --fix --require-checksum.' };
+    }
+  }
   if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: sublet doctor --fix' };
   try {
     const install = await installLlamaServer(options);
@@ -399,7 +404,7 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
   if (existingBinary) {
     const manifest = await readManifest(env);
     const known = manifest.installs.find((i) => i.path === existingBinary);
-    if (known?.binarySha256 && await sha256File(existingBinary) === known.binarySha256) {
+    if (known?.binarySha256 && (!options.requireChecksum || known.verified) && await sha256File(existingBinary) === known.binarySha256) {
       manifest.latest = existingBinary;
       await writeManifest(env, manifest);
       return { ...known, source: 'manifest' };

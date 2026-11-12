@@ -1,5 +1,7 @@
 export const BRAND = 'Sublet';
-export const VERSION = '1.2.2';
+export const VERSION = '1.3.0';
+/** Lowest supported Node.js; matches "engines" in package.json (undici, used for proxies, needs 20.18.1). */
+export const MIN_NODE = '20.18.1';
 export const AGENT_NAME = 'sublet-cli';
 export const USER_AGENT = `${AGENT_NAME}/${VERSION}`;
 export const DEFAULT_SERVER = process.env.SUBLET_SERVER || 'https://sublet.duckdns.org';

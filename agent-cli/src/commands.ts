@@ -4,8 +4,8 @@ import { readdir, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { Agent } from './agent.js';
-import { apiUrl, configPath, subletHome, maskToken, modelsDir, normalizeServer, type AgentConfig } from './config.js';
-import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, VERSION, compareVersions } from './version.js';
+import { apiUrl, configPath, subletHome, maskToken, modelsDir, normalizeServer, wsUrl, type AgentConfig } from './config.js';
+import { AGENT_NAME, BRAND, DEFAULT_SERVER, DEFAULT_WS_PATH, MIN_NODE, VERSION, compareVersions } from './version.js';
 import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
@@ -18,6 +18,10 @@ import { execFile, sleep, toError } from './util/exec.js';
 import { canOpenBrowser, openUrl } from './util/open.js';
 import { formatBytes, formatBytesPerSec, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
 import type { AgentMe, AgentRequest } from './types.js';
+import { EXIT, UsageError } from './exitCodes.js';
+import { SETTINGS_SPEC, type ResolvedSettings } from './settings.js';
+import { proxyFor, proxySettings, redactProxy } from './network/proxy.js';
+import { logsDir } from './config.js';
 
 export type GlobalFlags = {
   server?: string;
@@ -47,6 +51,9 @@ export type GlobalFlags = {
   timeoutMs?: number;
   requireChecksum: boolean;
   noBrowser: boolean;
+  nonInteractive?: boolean;
+  logLevel?: string;
+  logFile?: string;
   positionals: string[];
 };
 
@@ -60,18 +67,26 @@ function gpuOverrideFrom(flags: GlobalFlags): GpuOverride | null {
 
 async function resolvedConfig(flags: GlobalFlags, requireToken: boolean): Promise<AgentConfig> {
   const existing = await readConfigFile();
+  const server = serverFor(flags, existing?.server);
+  if (!flags.token && existing?.token && server !== normalizeServer(existing.server)) {
+    throw new UsageError('The saved host key belongs to a different server. Log in to the selected server or explicitly supply its key with SUBLET_KEY.');
+  }
   const token = flags.token || existing?.token || '';
-  if (!token && requireToken) throw new Error('No host key. Run: sublet login, or pass --key <key>');
+  if (!token && requireToken) throw new UsageError('No host key. Run: sublet login, or set SUBLET_KEY');
+  const wsPath = flags.wsPath || process.env.SUBLET_WS_PATH || existing?.wsPath || DEFAULT_WS_PATH;
+  try { wsUrl(server, '', wsPath, 'header'); } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : 'Invalid tunnel URL');
+  }
   return {
-    server: serverFor(flags, existing?.server),
+    server,
     token,
-    wsPath: flags.wsPath || existing?.wsPath || process.env.SUBLET_WS_PATH || DEFAULT_WS_PATH,
+    wsPath,
     updatedAt: Date.now(),
   };
 }
 
 async function promptToken(): Promise<string> {
-  if (!process.stdin.isTTY) throw new Error('No TTY to prompt. Pass --key <host key> or pipe the key on stdin.');
+  if (!process.stdin.isTTY) throw new UsageError('No TTY to prompt. Set SUBLET_KEY or pass --key <host key>.');
   const rl = createInterface({ input, output });
   try {
     const answer = await rl.question('Paste the host key from the Sublet dashboard: ');
@@ -157,6 +172,7 @@ async function saveHostKey(server: string, token: string, flags: GlobalFlags): P
 export async function readyConfig(flags: GlobalFlags, logger: Logger): Promise<AgentConfig> {
   const cfg = await resolvedConfig(flags, false);
   if (cfg.token) return cfg;
+  if (flags.nonInteractive) throw new UsageError('No host key in non-interactive mode. Run sublet login once, or set SUBLET_KEY.');
   logger.info(`This computer is not connected to ${BRAND} yet. Connect it first.`);
   const linked = await deviceLogin(cfg.server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
   if (!linked) throw new Error('No host key. Run: sublet login, or pass --key <key>');
@@ -169,6 +185,7 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
   const existing = await readConfigFile();
   const server = serverFor(flags, existing?.server);
   let token = (flags.token || flags.positionals[0] || '').trim();
+  if (!token && flags.nonInteractive) throw new UsageError('Non-interactive login requires SUBLET_KEY or --key. No browser login was started.');
   if (!token) {
     const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
     token = linked?.token ?? (await promptToken()).trim();
@@ -200,9 +217,16 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   const cfg = await resolvedConfig(flags, false);
   const server = cfg.server;
   const checks: Check[] = [];
-  const nodeMajor = Number(process.versions.node.split('.')[0]);
-  checks.push(check('Node.js', nodeMajor >= 20 ? 'ok' : 'fail', `v${process.versions.node} (need >= 20)`));
+  const nodeOk = compareVersions(process.versions.node, MIN_NODE) >= 0;
+  checks.push(check('Node.js', nodeOk ? 'ok' : 'fail', `v${process.versions.node} (need >= ${MIN_NODE})`));
   checks.push(check('Platform', 'ok', `${process.platform}/${process.arch}`));
+  try {
+    const proxy = proxyFor(server);
+    const ca = process.env.NODE_EXTRA_CA_CERTS;
+    checks.push(check('Network', 'ok', `${proxy ? `via proxy ${redactProxy(proxy)}` : 'direct (no proxy)'}${ca ? ` · extra CA ${ca}` : ''}`));
+  } catch (error) {
+    checks.push(check('Network', 'fail', toError(error).message));
+  }
   const latest = await latestPublishedVersion();
   const outdated = latest != null && compareVersions(latest, VERSION) > 0;
   checks.push(check('Agent version', outdated ? 'warn' : 'ok', outdated
@@ -259,7 +283,11 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
     else checks.push(check('llama-server', 'fail', result.reason));
   }
   if (install) {
-    checks.push(check('llama-server', install.verified ? 'ok' : 'warn', `${install.path} · ${install.variant} · ${install.verified ? 'checksum verified' : 'local hash recorded, no published checksum'}`));
+    const own = install.source === 'env' || install.source === 'path';
+    const trust = own
+      ? `your own build (${install.source === 'env' ? 'LLAMA_SERVER' : 'PATH'}), not checked; a different llama.cpp build can fail model checks`
+      : install.verified ? 'checksum verified' : 'local hash recorded, no published checksum';
+    checks.push(check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${install.variant} · ${trust}`}`));
   } else if (!flags.fix) {
     checks.push(check('llama-server', 'warn', `Not installed. Run: sublet doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
   }
@@ -269,7 +297,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
 
   const failures = checks.filter((c) => c.status === 'fail');
   if (flags.json) {
-    output.write(`${JSON.stringify({ ok: failures.length === 0, checks, server, config: configPath(), gpu, llama: install, me }, null, 2)}\n`);
+    output.write(`${JSON.stringify({ schemaVersion: 1, ok: failures.length === 0, agentVersion: VERSION, checks, server, config: configPath(), gpu, llama: install, me }, null, 2)}\n`);
   } else {
     output.write(`\n${BRAND} agent doctor\n`);
     output.write(`home: ${subletHome()}\nserver: ${server}\nkey: ${maskToken(cfg.token)}\n\n`);
@@ -301,7 +329,7 @@ async function listModels(): Promise<{ count: number; bytes: number }> {
 
 export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<number> {
   const requestId = flags.positionals[0] ?? null;
-  if (requestId && !/^[A-Za-z0-9_-]{3,80}$/.test(requestId)) throw new Error(`"${requestId}" is not a request code. Copy the start command from the website.`);
+  if (requestId && !/^[A-Za-z0-9_-]{3,80}$/.test(requestId)) throw new UsageError(`"${requestId}" is not a request code. Copy the start command from the website.`);
   const cfg = await readyConfig(flags, logger);
   if (requestId) logger.info(`Serving request ${requestId}. The agent stops when the booking ends.`);
   const agent = new Agent({
@@ -321,13 +349,16 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
     autoInstall: !flags.noInstall,
     json: flags.json,
     once: flags.once,
+    requireChecksum: flags.requireChecksum,
   });
   return await runAgent(agent, logger, requestId);
 }
 
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
   const model = flags.model || flags.positionals[0];
-  if (!model) throw new Error('Usage: sublet host <huggingface-gguf-url|path.gguf> --price 0.25');
+  if (!model) throw new UsageError('Usage: sublet host <huggingface-gguf-url|path.gguf> --price 0.25');
+  // Fail before model inspection or download when unattended credentials are missing.
+  const cfg = await readyConfig(flags, logger);
   if (!flags.simulation && !/^https?:\/\//i.test(model)) {
     try {
       await stat(model);
@@ -350,7 +381,6 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
       });
     }
   }
-  const cfg = await readyConfig(flags, logger);
   const agent = new Agent({
     config: cfg,
     logger,
@@ -368,6 +398,7 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
     autoInstall: !flags.noInstall,
     json: flags.json,
     once: flags.once,
+    requireChecksum: flags.requireChecksum,
   });
   return await runAgent(agent, logger);
 }
@@ -444,7 +475,7 @@ export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<numbe
     }
     return await serveClaim(cfg, flags.claim, flags, logger);
   }
-  if (!process.stdin.isTTY) {
+  if (flags.nonInteractive || !process.stdin.isTTY) {
     output.write('\nNon-interactive terminal. Use --claim <request-id> to take a job.\n');
     return 0;
   }
@@ -494,16 +525,20 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
     autoInstall: !flags.noInstall,
     json: flags.json,
     once: false,
+    requireChecksum: flags.requireChecksum,
   });
   let finished = false;
-  const stop = async () => {
+  let signalCode: number | null = null;
+  const stop = async (preserveState = false) => {
     if (finished) return;
     finished = true;
-    await agent.stop();
+    await agent.stop(preserveState);
   };
-  const onSignal = () => { void stop(); };
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
+  // Same contract as start/host: Ctrl+C clears saved state (130); SIGTERM keeps it for the next start (143).
+  const onInterrupt = () => { signalCode = EXIT.INTERRUPTED; void stop(); };
+  const onTerminate = () => { signalCode = EXIT.TERMINATED; void stop(true); };
+  process.once('SIGINT', onInterrupt);
+  process.once('SIGTERM', onTerminate);
   agent.once('stop', () => { finished = true; });
   // A cancel, release, or failed check arrives as a reject. It can come before the polling below sees the booking.
   let rejected: RejectedEvent | null = null;
@@ -538,6 +573,7 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
       }
       await sleep(1_000);
     }
+    if (signalCode != null) return signalCode;
     const ended = rejected as RejectedEvent | null;
     if (!ended) return 0;
     if (sawJob || ended.wasActive) {
@@ -547,9 +583,9 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
     logger.error(`Cannot serve ${requestId}: ${ended.reason}`);
     return 1;
   } finally {
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
-    await stop();
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onTerminate);
+    await stop(signalCode === EXIT.TERMINATED);
   }
 }
 
@@ -620,7 +656,8 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
   output.write(`user        @${me.user.username}\n`);
   output.write(`server      ${cfg.server}\n`);
   output.write(`host        ${host ? `${host.status} · ${host.kind} · ${host.gpuName}` : 'not registered yet'}\n`);
-  output.write(`reliability ${host ? formatPercent(host.uptimePct) : '-'}${host && host.uptimePct < 90 ? '  HELD' : ''}\n`);
+  // Only the server decides a hold (two strikes, or low reliability after repeated failures); never guess from the score.
+  output.write(`reliability ${host ? formatPercent(host.uptimePct) : '-'}${host?.status === 'held' ? `  HELD${host.flagReason ? ` (${host.flagReason})` : ''}` : ''}\n`);
   output.write(`model       ${host?.modelLabel || '-'} ${host?.quant || ''}\n`);
   output.write(`speed       ${formatSpeed(host?.tokPerSec)}\n`);
   output.write(`wallet      ${formatUsdNanos(me.wallet.availableNanos)} available · ${formatUsdNanos(me.wallet.pendingNanos)} pending\n`);
@@ -630,6 +667,57 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
     output.write(`booking     ${active.id} · ${active.status}${remaining != null ? ` · ${formatDuration(remaining)} left` : ''}\n`);
   }
   return 0;
+}
+
+/**
+ * `sublet config` (or `config show`): the settings this agent will actually use and where each one came from.
+ * `config path` prints the agent.json path. Secrets are always masked.
+ */
+export async function cmdConfig(flags: GlobalFlags, _logger: Logger, resolved: ResolvedSettings): Promise<number> {
+  const sub = (flags.positionals[0] || 'show').toLowerCase();
+  if (sub === 'path') {
+    output.write(flags.json ? `${JSON.stringify({ settings: resolved.file, config: configPath(), home: subletHome() })}\n` : `${resolved.file}\n`);
+    return EXIT.OK;
+  }
+  if (sub !== 'show') throw new UsageError(`Unknown config action "${sub}". Use: sublet config [show|path]`);
+  const saved = await readConfigFile();
+  const rows = SETTINGS_SPEC.map((row) => {
+    let value: unknown = resolved.values[row.key];
+    let source: string = resolved.sources[row.key] ?? 'default';
+    if (row.key === 'server' && value === undefined) {
+      value = saved?.server || DEFAULT_SERVER;
+      source = saved?.server ? 'login' : 'default';
+    }
+    if (row.key === 'token' && value === undefined && saved?.token) {
+      value = saved.token;
+      source = 'login';
+    }
+    if (row.key === 'wsPath' && value === undefined) value = saved?.wsPath || DEFAULT_WS_PATH;
+    if (row.key === 'logFile' && value === undefined) value = join(logsDir(), 'agent.log');
+    const shown = row.secret ? maskToken(typeof value === 'string' ? value : null) : value ?? null;
+    return { key: row.key, env: row.env, value: shown, source };
+  });
+  const proxy = proxySettings();
+  const network = {
+    httpsProxy: proxy.httpsProxy ? redactProxy(proxy.httpsProxy) : null,
+    httpProxy: proxy.httpProxy ? redactProxy(proxy.httpProxy) : null,
+    noProxy: proxy.noProxy,
+    extraCaCerts: process.env.NODE_EXTRA_CA_CERTS || null,
+  };
+  if (flags.json) {
+    output.write(`${JSON.stringify({ schemaVersion: 1, home: subletHome(), settingsFile: resolved.file, config: configPath(), settings: rows, network }, null, 2)}\n`);
+    return EXIT.OK;
+  }
+  output.write(`\n${BRAND} agent settings (flag > env > ${resolved.file} > default)\n\n`);
+  for (const row of rows) {
+    output.write(`${padRight(row.key, 16)} ${padRight(row.value == null ? '-' : String(row.value), 44)} ${padRight(row.source, 8)} ${row.env}\n`);
+  }
+  output.write(`\nnetwork\n`);
+  output.write(`${padRight('HTTPS_PROXY', 16)} ${network.httpsProxy || '-'}\n`);
+  output.write(`${padRight('HTTP_PROXY', 16)} ${network.httpProxy || '-'}\n`);
+  output.write(`${padRight('NO_PROXY', 16)} ${network.noProxy.join(',') || '-'}\n`);
+  output.write(`${padRight('CA certificates', 16)} ${network.extraCaCerts || 'system default'}\n`);
+  return EXIT.OK;
 }
 
 export async function cmdLogout(flags: GlobalFlags, logger: Logger): Promise<number> {
@@ -654,6 +742,7 @@ export function globalHelp(): string {
     '  host <gguf>           Serve a public pay-per-token model',
     '  jobs                  Browse and claim buyer requests from the terminal',
     '  status                Show this host, wallet, and active booking',
+    '  config [show|path]    Show the settings in use and where each came from',
     '  logout                Remove the saved host key',
     '',
     'Core options:',
@@ -667,15 +756,18 @@ export function globalHelp(): string {
     '  --price <usd>         Public price per 1M output tokens',
     '  --price-in <usd>      Public price per 1M input tokens',
     '  --price-out <usd>     Public price per 1M output tokens',
-    '  --gpu <name>          Override GPU detection (test mode)',
-    '  --vram <mb>           Override VRAM in MB (test mode)',
+    '  --gpu <name>          Correct a wrongly detected GPU name',
+    '  --vram <mb>           Correct detected VRAM in MB',
     '  --tok-s <n>           Advertised tokens/sec',
     '  --fix                 Download llama-server when doctor needs it',
     '  --require-checksum    Fail if llama-server has no published SHA-256',
     '  --no-browser          login: print the link instead of opening a browser',
+    '  --non-interactive     Never prompt or start device login; requires a configured host key',
     '  --claim <request-id>  Claim a board request non-interactively',
     '  --json                Machine-readable output',
-    '  --verbose             Debug logs',
+    '  --verbose             Debug logs (same as --log-level debug)',
+    '  --log-level <level>   debug, info, warn, error, or silent',
+    '  --log-file <path|off> Agent log file (start/host/jobs default: ~/.sublet/logs/agent.log)',
     '  --no-color            Disable ANSI colors',
     '  --no-install          Do not auto-download llama-server',
     '  --once                Exit after the first public job (testing)',
@@ -690,5 +782,9 @@ export function globalHelp(): string {
     '  sublet start --simulation --gpu "RTX 4060" --vram 8188',
     '  sublet host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
     '  sublet jobs',
+    '',
+    'Supported hosting settings can also come from SUBLET_* variables or',
+    '~/.sublet/agent.json (see: sublet config). Proxies: HTTPS_PROXY, NO_PROXY,',
+    'NODE_EXTRA_CA_CERTS. Exit codes: 0 ok, 1 error, 2 usage, 130 Ctrl+C, 143 SIGTERM.',
   ].join('\n');
 }

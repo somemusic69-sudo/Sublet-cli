@@ -6,7 +6,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
-import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary } from '../src/engine/binaryManager.js';
+import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary, ensureLlamaServer } from '../src/engine/binaryManager.js';
+
+test('strict checksum mode refuses an existing custom engine without downloading', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-strict-engine-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binary = join(dir, 'custom-engine');
+  await writeFile(binary, 'custom');
+  const env = { SUBLET_HOME: dir, LLAMA_SERVER: binary };
+  assert.equal((await ensureLlamaServer({ env })).found, true);
+  const strict = await ensureLlamaServer({ env, fix: true, requireChecksum: true, fetchImpl: async () => { throw new Error('must not download'); } });
+  assert.equal(strict.found, false);
+  if (!strict.found) assert.match(strict.reason, /require-checksum/);
+});
 
 function release(name: string, url: string, size: number) {
   return {

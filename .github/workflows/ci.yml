@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            node: 20
+            node: 20.18.1
           - os: ubuntu-latest
             node: 22
           - os: windows-latest
@@ -39,6 +39,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: node scripts/check-package.mjs
       - run: npm audit --omit=dev
 
   package:
@@ -63,3 +64,5 @@ jobs:
           npm pack --silent
           npm install --prefix /tmp/sublet-pkg "file:$(ls sublet-cli-*.tgz)"
           node /tmp/sublet-pkg/node_modules/sublet-cli/dist/index.js --version
+          node /tmp/sublet-pkg/node_modules/sublet-cli/dist/index.js config --json > /dev/null
+          ! ls /tmp/sublet-pkg/node_modules/sublet-cli/dist/*.map 2>/dev/null

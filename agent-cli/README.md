@@ -24,7 +24,7 @@ Postgres/SQLite ledger, wallet, reliability, request board
 
 ## Quick start
 
-You need Node.js 20 or newer (the LTS version from nodejs.org). On the GPU machine, run:
+You need Node.js 20.18.1 or newer (the LTS version from nodejs.org). On the GPU machine, run:
 
 ```bash
 npx sublet-cli start
@@ -82,11 +82,14 @@ ends or you press Ctrl+C.
 | `sublet host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
 | `sublet jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
 | `sublet status` | Read-only host, reliability, wallet and active-booking summary. |
+| `sublet config [show\|path]` | The settings in use and where each one came from (flag, env, `agent.json`, login, default). Keys are masked. |
 | `sublet logout` | Remove the saved host key. |
 
 Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 `--vram`, `--ctx`, `--slots`, `--price`, `--price-in`, `--price-out`,
-`--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--no-color`, `--once`.
+`--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--log-level`,
+`--log-file`, `--no-color`, `--once`. Each can also be set with a `SUBLET_*`
+environment variable or in `~/.sublet/agent.json` (see [Configuration](#configuration)).
 `--gpu` and `--vram` also correct a wrongly detected GPU name or VRAM size on a real host.
 
 ### Test mode
@@ -162,18 +165,137 @@ systemd/journald.
 Everything lives under `~/.sublet` (override with `SUBLET_HOME`):
 
 ```text
-~/.sublet/config.json        host key + server (0600)
+~/.sublet/config.json        host key + server, written by sublet login (0600)
+~/.sublet/agent.json         optional settings file you write (see Configuration)
 ~/.sublet/state.json         active booking recovery snapshot (0600)
 ~/.sublet/bin/               llama-server builds + manifest.json
 ~/.sublet/models/            verified .gguf files + .sublet.json sidecars
 ~/.sublet/cache/             GitHub release metadata, temporary archives
-~/.sublet/logs/              llama-server log (prompt logging disabled)
+~/.sublet/logs/agent.log     agent log, JSON lines, rotated (0600)
+~/.sublet/logs/llama-server.log  engine log (prompt logging disabled)
 ```
 
-Model files are never re-downloaded when the sidecar hash and file size still
-match. A resume sends `Range: bytes=N-` and appends only the missing bytes. If a
-server ignores Range, the partial file is discarded and the download restarts
-from zero rather than corrupting weights.
+A model that is already on disk is not downloaded again, but it is hashed again
+before it is served (once per agent run), so the SHA-256 sent to the server is
+of the bytes on disk and not of the sidecar note beside them. A file that fails
+is deleted and downloaded again. A resume sends `Range: bytes=N-` and appends
+only the missing bytes. If a server ignores Range, the partial file is discarded
+and the download restarts from zero rather than corrupting weights.
+
+## Configuration
+
+The settings listed below work three ways. The first one found wins:
+
+1. a command-line flag (`--ctx 16384`)
+2. an environment variable (`SUBLET_CTX=16384`)
+3. `~/.sublet/agent.json` (path override: `SUBLET_CONFIG`)
+
+```json
+{
+  "server": "https://sublet.duckdns.org",
+  "context": 8192,
+  "slots": 4,
+  "price": 0.25,
+  "noBrowser": true,
+  "logLevel": "info"
+}
+```
+
+| `agent.json` key | Environment variable | Flag |
+| --- | --- | --- |
+| `server` | `SUBLET_SERVER` | `--server` |
+| `token` | `SUBLET_KEY` | `--key` |
+| `wsPath` | `SUBLET_WS_PATH` | `--ws-path` |
+| `context` | `SUBLET_CTX` | `--ctx` |
+| `slots` | `SUBLET_SLOTS` | `--slots` |
+| `price` / `priceIn` / `priceOut` | `SUBLET_PRICE` / `SUBLET_PRICE_IN` / `SUBLET_PRICE_OUT` | `--price` / `--price-in` / `--price-out` |
+| `gpu` / `vram` | `SUBLET_GPU` / `SUBLET_VRAM` | `--gpu` / `--vram` |
+| `tokPerSec` | `SUBLET_TOK_S` | `--tok-s` |
+| `noInstall` | `SUBLET_NO_INSTALL` | `--no-install` |
+| `noBrowser` | `SUBLET_NO_BROWSER` | `--no-browser` |
+| `requireChecksum` | `SUBLET_REQUIRE_CHECKSUM` | `--require-checksum` |
+| `logLevel` | `SUBLET_LOG_LEVEL` | `--log-level` |
+| `logFile` | `SUBLET_LOG_FILE` | `--log-file` |
+
+An unknown key or a bad value in `agent.json` stops the agent with exit code 2
+and names the problem; a typo is never ignored silently. `sublet config` prints
+the value in use for every setting and where it came from (keys masked);
+`sublet config --json` gives the same for tooling.
+
+## Corporate networks
+
+The agent only connects outward: the Sublet server (HTTPS + one WebSocket),
+HuggingFace for models, GitHub for llama.cpp releases, and npm for the version
+check. Nothing listens on the network; `llama-server` binds to `127.0.0.1`.
+
+```bash
+export HTTPS_PROXY=http://user:password@proxy.corp.example:3128
+export NO_PROXY=.corp.example,10.0.0.5
+export NODE_EXTRA_CA_CERTS=/etc/ssl/corp-root.pem   # TLS-inspecting proxies
+sublet doctor        # "Network: via proxy http://***@proxy.corp.example:3128"
+```
+
+- `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` are read in upper or lower case.
+  `NO_PROXY` takes host names, `.domain` suffixes, exact IP addresses,
+  `host:port`, or `*` (CIDR ranges are not supported).
+- The tunnel and downloads use HTTP CONNECT, so TLS runs end to end and the
+  host key is never visible to the proxy. Proxy passwords are never printed.
+- Only `http://` and `https://` proxies are supported (no SOCKS); anything else
+  stops the agent with a clear message and exit code 2.
+- Loopback (`localhost`, `127.*`) is never proxied.
+
+## Logs
+
+`start`, `host`, and `jobs` write every record, debug included, to
+`~/.sublet/logs/agent.log` as JSON lines (`ts`, `level`, `message`, fields).
+The file rotates at 10 MB and keeps 5 old files (`agent.log.1` ... `.5`). Use
+`--log-file <path>` to move it or `--log-file off` to disable it. The
+terminal shows `info` and above (`--log-level`, `--verbose`). Host keys, API
+keys, bearer tokens, and `token=` URL parameters are replaced with `***`
+everywhere. Prompts and model output are never logged.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success, or a booking that ended normally |
+| `1` | Runtime error: server unreachable, host key rejected, request refused, crash loop |
+| `2` | Usage or settings error: unknown command or flag, invalid value, bad `agent.json`, bad proxy |
+| `130` | Stopped with Ctrl+C; saved booking state is cleared |
+| `143` | Stopped by SIGTERM (shutdown, `systemctl stop`); saved booking state is kept so the next start reattaches |
+
+## Running unattended
+
+A service manager should restart the agent and send SIGTERM to stop it. A
+systemd example (Linux):
+
+```ini
+# /etc/systemd/system/sublet.service
+[Unit]
+Description=Sublet GPU host agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=sublet
+Environment=SUBLET_NO_BROWSER=true
+# Run "sublet login --key sh_..." once as this user, or provide SUBLET_KEY from a secret store.
+ExecStart=/usr/bin/env npx --yes sublet-cli@1 start --no-color
+Restart=always
+RestartSec=10
+# Exit code 2 is a configuration mistake: do not restart in a loop.
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Pin a major version (`sublet-cli@1`) so an unattended machine never jumps to
+a release with breaking changes. On Windows, Task Scheduler ("At startup",
+"Restart on failure") or a service wrapper such as NSSM running
+`npx --yes sublet-cli@1 start` does the same.
 
 ## Verification and safety
 
@@ -187,7 +309,11 @@ from zero rather than corrupting weights.
 4. **VRAM fit.** The agent checks free VRAM with a 2% safety margin before it
    claims/loads, so a host does not fail a booking on an OOM.
 5. **Locked engine flags.** `--n-gpu-layers 999 --ctx-size <n> --parallel <n>
-   --cont-batching --log-disable`, bound to `127.0.0.1`.
+   --cont-batching --log-disable`, bound to `127.0.0.1`. llama.cpp's own
+   environment settings (`LLAMA_ARG_*`, `LLAMA_LOG_*`, `LLAMA_API_KEY`) are
+   removed from the engine's environment, so a host's private llama.cpp setup
+   cannot change the engine. A `llama-server` from `LLAMA_SERVER` or `PATH` is
+   used as it is, with a warning that another build can fail model checks.
 6. **Model checks.** Every job asks `llama-server` for token probabilities
    (`logprobs`, top 5), and the first 32 tokens of every job carry them to the
    server. The server sends hidden check prompts as normal `infer` jobs (a host
@@ -195,6 +321,16 @@ from zero rather than corrupting weights.
    run the same file, or with a trusted reference host. The booking timer starts
    only after the first check, and checks continue at random times. Asking for
    probabilities costs `llama-server` a little extra work on every token.
+   **The server is what catches a fake model.** This program runs on the host's
+   machine and is open source, so nothing it reports about itself is proof.
+   What it does locally is for the honest host: after every model load it asks
+   the engine one fixed question twice at temperature 0 and compares the token
+   probabilities, and after a crash restart it compares against the load-time
+   answer. A measured difference is a diagnostic warning, not a diagnosis of
+   faulty hardware or proof of model identity. Missing, malformed, incomplete,
+   or ambiguous evidence is inconclusive, never a pass. The self-check never
+   stops a booking, and a buyer's job cancels it. Server-side authenticity and
+   billing behavior require separate end-to-end validation.
 7. **Sleep guard.** Windows uses a native `SetThreadExecutionState` loop;
    macOS uses `caffeinate -dimsu`; Linux uses `systemd-inhibit`. The lock is
    released when the job ends and on process exit.

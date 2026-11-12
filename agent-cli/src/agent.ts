@@ -6,10 +6,11 @@ import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuSnapshot } from './hardware/types.js';
 import { SleepGuard } from './hardware/sleepGuard.js';
-import { ensureLlamaServer, type LlamaInstall } from './engine/binaryManager.js';
+import { ensureLlamaServer, type EnsureResult, type LlamaInstall } from './engine/binaryManager.js';
 import { downloadModel, listCachedModels, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
 import { checkModelUrl, estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
 import { LlamaRunner } from './engine/llamaRunner.js';
+import { compareFingerprints, probeEngine, type EngineFingerprint } from './engine/selfCheck.js';
 import { simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
 import { TerminalDashboard, initialState, type DashboardJob, type DashboardState, type DashboardStatus } from './ui/terminalDashboard.js';
@@ -38,9 +39,12 @@ export type AgentOptions = {
   requestId?: string | null;
   tokPerSec?: number | null;
   autoInstall?: boolean;
+  requireChecksum?: boolean;
   json?: boolean;
   once?: boolean;
   dashboard?: boolean;
+  /** Unit tests only: run this program as the engine instead of an installed llama-server. */
+  engine?: { binaryPath: string; baseArgs?: string[]; env?: NodeJS.ProcessEnv };
 };
 
 type AgentModel = {
@@ -129,6 +133,9 @@ export class Agent extends EventEmitter {
   private bookingTimer: NodeJS.Timeout | null = null;
   private endTimer: NodeJS.Timeout | null = null;
   private logLines: string[] = [];
+  /** The engine's answer to the self-check prompt right after the current model was loaded. */
+  private engineBaseline: { modelPath: string; fingerprint: EngineFingerprint } | null = null;
+  private selfCheckAbort: AbortController | null = null;
 
   constructor(options: AgentOptions) {
     super();
@@ -437,7 +444,7 @@ export class Agent extends EventEmitter {
         layers: opts.expectedLayers ?? null,
         contextTrain: opts.context,
         sha256: opts.expectedSha ?? null,
-        verified: Boolean(opts.expectedSha),
+        verified: false,
         needsMb: estimateVramMb({ paramB, quant, context: opts.context, layers: opts.expectedLayers ?? undefined, slots: this.runnerSlots() }),
         size: 0,
         architecture: 'simulation',
@@ -451,6 +458,8 @@ export class Agent extends EventEmitter {
         expectedLayers: opts.expectedLayers ?? null,
         context: opts.context,
         slots: this.runnerSlots(),
+        // A file already on disk is hashed again: the SHA-256 the server gets is of the bytes that will be served.
+        verifyCached: true,
         onProgress: (progress) => {
           if (opts.requestId) {
             this.tunnel?.send({ type: 'progress', requestId: opts.requestId, note: progress.note });
@@ -505,15 +514,26 @@ export class Agent extends EventEmitter {
   private async ensureRunner(model: AgentModel, context: number, slots = this.runnerSlots()): Promise<void> {
     if (this.options.simulation || !model.path) return;
     if (!this.install) {
-      const result = await ensureLlamaServer({
-        logger: this.logger,
-        gpu: this.gpu,
-        fix: this.options.autoInstall !== false,
-        showProgress: true,
-      });
+      const result: EnsureResult = this.options.engine
+        ? { found: true, install: { path: this.options.engine.binaryPath, version: 'test', variant: 'cpu', sha256: null, verified: false, source: 'env' } }
+        : await ensureLlamaServer({
+          logger: this.logger,
+          gpu: this.gpu,
+          fix: this.options.autoInstall !== false,
+          requireChecksum: this.options.requireChecksum,
+          showProgress: true,
+        });
       if (!result.found) throw new Error(result.reason);
       this.install = result.install;
       this.logger.info('llama-server ready', { path: result.install.path, variant: result.install.variant, verified: result.install.verified });
+      const source = result.install.source;
+      if (source === 'env' || source === 'path') {
+        this.logger.warn(
+          `Using your own llama-server (${source === 'env' ? 'set in LLAMA_SERVER' : 'found on your PATH'}), not the build Sublet installs. `
+          + 'The server compares your answers with other hosts; a different llama.cpp build can fail those model checks. '
+          + `To use the official build, ${source === 'env' ? 'unset LLAMA_SERVER' : 'take llama-server off your PATH'} and run: sublet doctor --fix`,
+        );
+      }
     }
     if (this.runner && this.runner.status === 'ready' && this.runnerModelPath === model.path && this.runnerContext === context) return;
     if (this.runner) {
@@ -527,6 +547,8 @@ export class Agent extends EventEmitter {
       modelPath: model.path,
       context,
       slots,
+      baseArgs: this.options.engine?.baseArgs,
+      env: this.options.engine?.env,
       logger: this.logger,
       restart: { maxRestarts: 5, windowMs: 120_000, delayMs: 500 },
       onLog: (line) => {
@@ -540,6 +562,8 @@ export class Agent extends EventEmitter {
     });
     runner.on('ready', () => {
       this.dashboard.update({ llamaStatus: 'ready' });
+      // After a crash the engine reloads the model; make sure it still answers as it did before.
+      if (runner.restarts > 0 && this.runner === runner) void this.selfCheckEngine('restart');
     });
     runner.on('crash', () => {
       this.logger.warn('llama-server crashed; the runner is restarting it');
@@ -554,6 +578,66 @@ export class Agent extends EventEmitter {
     this.runnerModelPath = model.path;
     this.runnerContext = context;
     this.dashboard.update({ llamaStatus: runner.status, gpuName: this.gpu.primary?.name || null });
+    await this.selfCheckEngine('load');
+  }
+
+  /**
+   * Asks the engine one short fixed question and compares the answer's token probabilities:
+   * twice in a row after a load, and against the load-time answer after a crash restart. It only
+   * warns; the server's model checks decide. It runs when the engine's prompt cache is empty and
+   * no buyer is waiting, and a buyer's job cancels it.
+   */
+  private async selfCheckEngine(reason: 'load' | 'restart'): Promise<void> {
+    const runner = this.runner;
+    const modelPath = this.runnerModelPath;
+    if (this.options.simulation || !runner || !modelPath || runner.status !== 'ready' || this.activeJobs.size > 0 || this.stopped) return;
+    this.selfCheckAbort?.abort();
+    const controller = new AbortController();
+    this.selfCheckAbort = controller;
+    const signal = AbortSignal.any([controller.signal, this.startup.signal]);
+    try {
+      const first = await probeEngine(runner.url, { signal });
+      if (!first) {
+        this.logger.debug('Engine self-check skipped: the engine gave no token probabilities in time');
+        return;
+      }
+      if (signal.aborted || this.stopped || this.runner !== runner) return;
+      const baseline = this.engineBaseline?.modelPath === modelPath ? this.engineBaseline.fingerprint : null;
+      if (reason === 'restart' && baseline) {
+        const diff = compareFingerprints(baseline, first);
+        if (diff.same === null) {
+          this.logger.debug('Engine self-check inconclusive after restart', { reason: diff.reason });
+          return;
+        }
+        if (diff.same === true) {
+          this.logger.info('Engine self-check passed after the restart', { tokens: diff.compared });
+          return;
+        }
+        const note = `Self-check: after the restart llama-server answers differently than when the model was loaded (${diff.reason}). The server's model checks may fail.`;
+        this.logger.warn(note);
+        this.dashboard.update({ message: note });
+        return;
+      }
+      const second = await probeEngine(runner.url, { signal });
+      if (!second || signal.aborted || this.stopped || this.runner !== runner) return;
+      const diff = compareFingerprints(first, second);
+      if (diff.same === null) {
+        this.logger.debug('Engine self-check inconclusive', { reason: diff.reason });
+        return;
+      }
+      if (diff.same === true) {
+        this.engineBaseline = { modelPath, fingerprint: first };
+        this.logger.info('Engine self-check passed: the same prompt gave the same answer twice', { tokens: diff.compared });
+        return;
+      }
+      const note = `Self-check: the engine returned different token probabilities for the same prompt (${diff.reason}). This is diagnostic only, not proof of a fake model or faulty GPU. Check engine settings and repeat the test.`;
+      this.logger.warn(note);
+      this.dashboard.update({ message: note });
+    } catch (error) {
+      this.logger.debug('Engine self-check could not run', { error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (this.selfCheckAbort === controller) this.selfCheckAbort = null;
+    }
   }
 
   private runnerSlots(): number {
@@ -638,15 +722,24 @@ export class Agent extends EventEmitter {
         if (job) job.controller.abort(new Error('Cancelled by server'));
         return;
       }
-      case 'verified':
-        this.dashboard.update({ job: this.dashboard.current.job ? { ...this.dashboard.current.job, verified: true } : null, message: 'Model check passed. The clock can start.' });
+      case 'verified': {
+        const current = this.dashboard.current.job;
+        if (current?.kind !== 'request' || current.id !== message.requestId || this.loadingModel) return;
+        this.dashboard.update({ job: { ...current, verified: true }, message: 'Model check passed. The clock can start.' });
         return;
+      }
       case 'booking':
         this.applyBooking(message as unknown as Record<string, unknown>);
         return;
       case 'reject': {
         const requestId = String(message.requestId || '');
         const reason = String(message.reason || 'unknown');
+        const current = this.dashboard.current.job;
+        const mine = current?.kind === 'request' && current.id === requestId;
+        if (!mine && this.loadAbort?.requestId !== requestId) {
+          this.emit('rejected', { requestId, reason, wasActive: false });
+          return;
+        }
         this.bookingWake = false;
         this.loadingModel = false;
         this.clearPersistedBooking();
@@ -655,8 +748,6 @@ export class Agent extends EventEmitter {
           this.loadAbort.controller.abort(new Error(`Request ${requestId} stopped: ${reason}`));
           this.loadAbort = null;
         }
-        const current = this.dashboard.current.job;
-        const mine = current?.kind === 'request' && current.id === requestId;
         if (mine) this.dashboard.update({ job: null });
         this.dashboard.update({ message: requestId.startsWith('bench_') ? reason : `Request ${requestId || '?'} stopped: ${reason}`, wakeLock: false });
         this.emit('rejected', { requestId, reason, wasActive: mine && Boolean(current.timerEndsAt) });
@@ -724,6 +815,8 @@ export class Agent extends EventEmitter {
     const jobId = String(message.jobId || '');
     if (!jobId) return;
     if (this.activeJobs.has(jobId)) return;
+    // A buyer never waits behind the agent's own self-check.
+    this.selfCheckAbort?.abort();
     const controller = new AbortController();
     const active: ActiveJob = {
       jobId,
@@ -870,9 +963,11 @@ export class Agent extends EventEmitter {
         llamaUp: this.options.simulation || this.runner?.status === 'ready',
       });
       this.dashboard.update({
-        job: { kind: 'request', id: requestId, model: model.file, verified: true, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
+        job: { kind: 'request', id: requestId, model: model.file, verified: false, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
         llamaStatus: this.runner?.status || 'simulation',
-        message: 'Loaded and hash-checked. Waiting for the model check.',
+        message: this.options.simulation ? 'Simulation loaded. Waiting for the server check.'
+          : model.verified ? 'File hash matched. Waiting for the server model check.'
+            : 'Model loaded without a reference hash. Waiting for the server model check.',
       });
       this.persistCurrentBooking({ requestId, context, slots: this.bookingSlots });
     } catch (error) {
@@ -907,7 +1002,7 @@ export class Agent extends EventEmitter {
           kind: 'request',
           id: active.id,
           model: active.file || this.model?.file || null,
-          verified: true,
+          verified: Boolean(active.timerStartedAt) || (current?.id === active.id && current.verified === true),
           timerStartedAt: active.timerStartedAt ?? null,
           timerEndsAt: active.timerEndsAt ?? null,
           minTokS: active.minTokS ?? null,
@@ -1103,6 +1198,7 @@ export class Agent extends EventEmitter {
     this.bookingWake = false;
     this.loadingModel = false;
     if (!preserveState) this.clearPersistedBooking();
+    this.selfCheckAbort?.abort();
     for (const job of this.activeJobs.values()) job.controller.abort(new Error('Agent stopping'));
     this.activeJobs.clear();
     this.startup.abort(new Error('Agent stopping'));

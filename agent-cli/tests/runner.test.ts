@@ -3,9 +3,19 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { buildLlamaArgs, findFreePort, LlamaRunner, type LlamaRunnerOptions } from '../src/engine/llamaRunner.js';
+import { buildLlamaArgs, engineEnv, findFreePort, LlamaRunner, type LlamaRunnerOptions } from '../src/engine/llamaRunner.js';
 
 const FIXTURE = join(process.cwd(), 'tests', 'fixtures', 'fake-llama-server.mjs');
+
+test('engine env overrides cannot reintroduce forbidden llama settings', () => {
+  const base = { PATH: 'base', CUDA_VISIBLE_DEVICES: '0', LLAMA_API_KEY: 'inherited-secret', LLAMA_ARG_MODEL: 'old.gguf' };
+  const extra = { PATH: 'override', CUDA_VISIBLE_DEVICES: '1', LLAMA_API_KEY: 'override-secret', LLAMA_ARG_MODEL: 'new.gguf', llama_log_file: 'prompts.log', llama_arg_chat_template: 'chatml' };
+  const { env, dropped } = engineEnv(base, extra);
+  assert.deepEqual(env, { PATH: 'override', CUDA_VISIBLE_DEVICES: '1' });
+  assert.deepEqual(dropped, ['LLAMA_API_KEY', 'LLAMA_ARG_MODEL', 'llama_arg_chat_template', 'llama_log_file']);
+  assert.equal(base.LLAMA_API_KEY, 'inherited-secret', 'does not mutate callers');
+  assert.equal(extra.LLAMA_ARG_MODEL, 'new.gguf');
+});
 
 // First spawn serves /health and exits on /crash. Later spawns hang (never
 // healthy) or exit at once, depending on FLAKY_MODE; 'dead' exits every time.
