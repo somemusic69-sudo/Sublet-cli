@@ -149,7 +149,7 @@ test('a server that requires a newer agent stops reconnecting with an update hin
     tunnel.start();
     const error = await outdated;
     assert.match(error.message, /needs v1\.4\.0/);
-    assert.match(error.message, /npx sublet-cli@latest/);
+    assert.match(error.message, /npx sublera-cli@latest/);
     await assert.rejects(welcome, /too old/);
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(tunnel.state, 'outdated');

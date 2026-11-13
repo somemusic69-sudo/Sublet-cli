@@ -80,8 +80,8 @@ test('a loaded model passes the engine self-check, and passes it again after a c
   const server = await subletServer();
   const { agent, logs } = hostAgent(server.url);
   const said = (pattern: RegExp) => logs.some((log) => pattern.test(log.message));
+  const running = agent.run();
   try {
-    void agent.run().catch(() => undefined);
     await waitFor('the load-time self-check', () => said(/self-check passed: the same prompt gave the same answer twice/));
     await waitFor('the agent to come online', () => server.hellos() > 0);
     assert.ok(said(/Using your own llama-server/), 'a custom engine must be called out');
@@ -93,6 +93,7 @@ test('a loaded model passes the engine self-check, and passes it again after a c
     await waitFor('the self-check after the restart', () => said(/self-check passed after the restart/));
   } finally {
     await agent.stop();
+    await running;
     await server.close();
   }
 });
@@ -100,13 +101,14 @@ test('a loaded model passes the engine self-check, and passes it again after a c
 test('an engine whose answers change is reported, and the host still comes online', async () => {
   const server = await subletServer();
   const { agent, logs } = hostAgent(server.url, { FAKE_DRIFT: '1' });
+  const running = agent.run();
   try {
-    void agent.run().catch(() => undefined);
     await waitFor('the repeatability warning', () => logs.some((log) => log.level === 'warn' && /engine returned different token probabilities/.test(log.message)));
     // The self-check only warns; the server's model checks decide.
     await waitFor('the agent to come online', () => server.hellos() > 0);
   } finally {
     await agent.stop();
+    await running;
     await server.close();
   }
 });

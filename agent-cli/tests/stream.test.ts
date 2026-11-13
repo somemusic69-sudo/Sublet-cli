@@ -124,10 +124,13 @@ test('every job asks llama-server for token probabilities and sends them with th
 
 test('simulated jobs carry stand-in probabilities in the same shape', async () => {
   const seen: number[] = [];
-  await simulateChat({ jobId: 'j', messages: [{ role: 'user', content: 'hello there' }], maxTokens: 64, temperature: 0.7 }, {
+  const result = await simulateChat({ jobId: 'j', messages: [{ role: 'user', content: 'hello there' }], maxTokens: 64, temperature: 0.7 }, {
     tokPerSec: 1_000,
     onChunk: (_text, positions) => seen.push(positions.length),
   });
+  assert.match(result.text, /On sublera-simulator,/);
+  assert.match(result.text, /Run sublera doctor/);
+  assert.doesNotMatch(result.text, /sublet/i);
   assert.ok(seen.length > 3);
   assert.ok(seen.every((n, i) => n === (i < PROBED_POSITIONS ? 1 : 0)));
 });

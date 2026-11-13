@@ -22,6 +22,46 @@ const SHA = createHash('sha256').update(MODEL).digest('hex');
 const STUB_URL = 'https://huggingface.co/test/model/resolve/main/model.gguf';
 const modelFetch = (async () => new Response(new Uint8Array(MODEL), { headers: { 'content-length': String(MODEL.length) } })) as typeof fetch;
 
+test('restarted partials reclaim cache budget, while resumed partials remain counted', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-budget-'));
+  const oldBudget = process.env.SUBLET_MODEL_CACHE_GB;
+  const oldReserve = process.env.SUBLET_MIN_FREE_DISK_GB;
+  // Exactly enough for the new model plus the metadata allowance, but not both
+  // the discarded partial and the replacement. Use byte-exact binary fractions.
+  process.env.SUBLET_MODEL_CACHE_GB = String((64 * 1024 + MODEL.length + 512) / 1024 ** 3);
+  process.env.SUBLET_MIN_FREE_DISK_GB = String(1 / 1024 ** 3);
+  t.after(async () => {
+    if (oldBudget == null) delete process.env.SUBLET_MODEL_CACHE_GB; else process.env.SUBLET_MODEL_CACHE_GB = oldBudget;
+    if (oldReserve == null) delete process.env.SUBLET_MIN_FREE_DISK_GB; else process.env.SUBLET_MIN_FREE_DISK_GB = oldReserve;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const part = `${modelPathFor(STUB_URL, dir)}.part`;
+  for (const mode of ['ignored-known', 'ignored-unknown', 'range-416', 'source-changed', 'resume'] as const) {
+    await rm(modelPathFor(STUB_URL, dir), { force: true });
+    await rm(`${modelPathFor(STUB_URL, dir)}.sublet.json`, { force: true });
+    const partial = mode === 'resume' ? MODEL.subarray(0, 100) : Buffer.alloc(4096, 1);
+    await writeFile(part, partial);
+    await writeFile(`${part}.json`, JSON.stringify({ url: mode === 'source-changed' ? 'https://huggingface.co/other/model.gguf' : STUB_URL }));
+    let calls = 0;
+    const loaded = await downloadModel({
+      url: STUB_URL, cacheDir: dir, showProgress: false, expectedSha256: SHA,
+      fetchImpl: (async (_url, init) => {
+        calls++;
+        const range = new Headers(init?.headers).get('range');
+        assert.equal(range, mode === 'source-changed' || calls === 2 ? null : `bytes=${partial.length}-`);
+        if (mode === 'range-416' && calls === 1) return new Response(null, { status: 416 });
+        if (mode === 'resume') return new Response(new Uint8Array(MODEL.subarray(100)), {
+          status: 206, headers: { 'content-range': `bytes 100-${MODEL.length - 1}/${MODEL.length}` },
+        });
+        return new Response(new Uint8Array(MODEL), { headers: mode === 'ignored-unknown' ? {} : { 'content-length': String(MODEL.length) } });
+      }) as typeof fetch,
+    });
+    assert.equal(loaded.sha256, SHA, mode);
+    assert.deepEqual(await readFile(loaded.path), MODEL, mode);
+    assert.equal(calls, mode === 'range-416' ? 2 : 1, mode);
+  }
+});
+
 test('a computed hash without an expected digest never becomes verified', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sublet-model-'));
   try {

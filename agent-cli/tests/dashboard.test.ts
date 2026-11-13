@@ -40,7 +40,7 @@ test('the dashboard frame shows the fields a host needs overnight', () => {
   state.logTail = ['llama-server loaded', 'slot released'];
   state.keyHint = 'W host page · C copy endpoint · L logs · ? help';
   const frame = renderFrame(state, { width: 72, color: false });
-  assert.ok(frame.includes(`Sublet GPU TERMINAL AGENT v${VERSION}`));
+  assert.ok(frame.includes(`Sublera GPU TERMINAL AGENT v${VERSION}`));
   assert.match(frame, /STATUS: .*WORKING/);
   assert.match(frame, /Host Endpoint/);
   assert.match(frame, /Reliability\s+: 98\.5%/);

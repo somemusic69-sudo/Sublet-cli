@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { subletHome } from './config.js';
+import { brandEnv } from './util/env.js';
 import { isLogLevel, type LogLevel } from './logger.js';
 
 /**
@@ -24,6 +25,7 @@ export type Settings = {
   noInstall?: boolean;
   noBrowser?: boolean;
   nonInteractive?: boolean;
+  drainTimeoutMs?: number;
   requireChecksum?: boolean;
   logLevel?: LogLevel;
   /** A path, or "off" to disable the agent log file. */
@@ -50,13 +52,14 @@ export const SETTINGS_SPEC: ReadonlyArray<{ key: keyof Settings; env: string; ki
   { key: 'noInstall', env: 'SUBLET_NO_INSTALL', kind: 'boolean', help: 'Never download llama-server' },
   { key: 'noBrowser', env: 'SUBLET_NO_BROWSER', kind: 'boolean', help: 'Never open a browser' },
   { key: 'nonInteractive', env: 'SUBLET_NON_INTERACTIVE', kind: 'boolean', help: 'Never prompt or begin device login; fail when a key is missing' },
+  { key: 'drainTimeoutMs', env: 'SUBLET_DRAIN_TIMEOUT_MS', kind: 'integer', help: 'SIGTERM inference drain grace period (0–300000 ms; default 30000)' },
   { key: 'requireChecksum', env: 'SUBLET_REQUIRE_CHECKSUM', kind: 'boolean', help: 'Refuse a llama.cpp release without a published SHA-256' },
   { key: 'logLevel', env: 'SUBLET_LOG_LEVEL', kind: 'level', help: 'Terminal log level: debug, info, warn, error, silent' },
   { key: 'logFile', env: 'SUBLET_LOG_FILE', kind: 'string', help: 'Agent log file path, or "off"' },
 ];
 
 export function settingsPath(env: NodeJS.ProcessEnv = process.env): string {
-  const explicit = env.SUBLET_CONFIG?.trim();
+  const explicit = brandEnv(env, 'SUBLET_CONFIG')?.trim();
   return explicit ? resolve(explicit) : join(subletHome(env), 'agent.json');
 }
 
@@ -117,7 +120,7 @@ export function readSettingsFile(path: string = settingsPath()): Settings {
 export function readSettingsEnv(env: NodeJS.ProcessEnv = process.env): Settings {
   const out: Record<string, unknown> = {};
   for (const row of SETTINGS_SPEC) {
-    const value = env[row.env];
+    const value = brandEnv(env, row.env);
     if (value == null || value === '') continue;
     out[row.key] = coerce(row.kind, value, row.env);
   }
@@ -153,7 +156,7 @@ export function applySettings<T extends object>(flags: T, explicit: ReadonlySet<
 /** Merges flags over environment over agent.json. */
 export function resolveSettings(fromFlags: Settings, env: NodeJS.ProcessEnv = process.env): ResolvedSettings {
   const file = settingsPath(env);
-  if (env.SUBLET_CONFIG?.trim()) {
+  if (brandEnv(env, 'SUBLET_CONFIG')?.trim()) {
     try { readFileSync(file, 'utf8'); } catch { throw new Error(`Cannot read the settings file selected by SUBLET_CONFIG: ${file}`); }
   }
   const layers: Array<[SettingSource, Settings]> = [['file', readSettingsFile(file)], ['env', readSettingsEnv(env)], ['flag', fromFlags]];
@@ -175,5 +178,6 @@ export function resolveSettings(fromFlags: Settings, env: NodeJS.ProcessEnv = pr
   }
   if (typeof values.context === 'number' && values.context < 256) throw new Error('context must be at least 256 tokens');
   if (typeof values.slots === 'number' && (values.slots < 1 || values.slots > 16)) throw new Error('slots must be between 1 and 16');
+  if (typeof values.drainTimeoutMs === 'number' && values.drainTimeoutMs > 300_000) throw new Error('drainTimeoutMs must be between 0 and 300000');
   return { values: values as Settings, sources, file };
 }

@@ -22,6 +22,8 @@ import { EXIT, UsageError } from './exitCodes.js';
 import { SETTINGS_SPEC, type ResolvedSettings } from './settings.js';
 import { proxyFor, proxySettings, redactProxy } from './network/proxy.js';
 import { logsDir } from './config.js';
+import { acquireInstanceLock } from './util/instanceLock.js';
+import { brandEnv } from './util/env.js';
 
 export type GlobalFlags = {
   server?: string;
@@ -52,13 +54,14 @@ export type GlobalFlags = {
   requireChecksum: boolean;
   noBrowser: boolean;
   nonInteractive?: boolean;
+  drainTimeoutMs?: number;
   logLevel?: string;
   logFile?: string;
   positionals: string[];
 };
 
 function serverFor(flags: GlobalFlags, fallback?: string): string {
-  return normalizeServer(flags.server || process.env.SUBLET_SERVER || fallback || DEFAULT_SERVER);
+  return normalizeServer(flags.server || brandEnv(process.env, 'SUBLET_SERVER') || fallback || DEFAULT_SERVER);
 }
 
 function gpuOverrideFrom(flags: GlobalFlags): GpuOverride | null {
@@ -72,8 +75,8 @@ async function resolvedConfig(flags: GlobalFlags, requireToken: boolean): Promis
     throw new UsageError('The saved host key belongs to a different server. Log in to the selected server or explicitly supply its key with SUBLET_KEY.');
   }
   const token = flags.token || existing?.token || '';
-  if (!token && requireToken) throw new UsageError('No host key. Run: sublet login, or set SUBLET_KEY');
-  const wsPath = flags.wsPath || process.env.SUBLET_WS_PATH || existing?.wsPath || DEFAULT_WS_PATH;
+  if (!token && requireToken) throw new UsageError('No host key. Run: sublera login, or set SUBLET_KEY');
+  const wsPath = flags.wsPath || brandEnv(process.env, 'SUBLET_WS_PATH') || existing?.wsPath || DEFAULT_WS_PATH;
   try { wsUrl(server, '', wsPath, 'header'); } catch (error) {
     throw new UsageError(error instanceof Error ? error.message : 'Invalid tunnel URL');
   }
@@ -89,7 +92,7 @@ async function promptToken(): Promise<string> {
   if (!process.stdin.isTTY) throw new UsageError('No TTY to prompt. Set SUBLET_KEY or pass --key <host key>.');
   const rl = createInterface({ input, output });
   try {
-    const answer = await rl.question('Paste the host key from the Sublet dashboard: ');
+    const answer = await rl.question('Paste the host key from the Sublera dashboard: ');
     return answer.trim();
   } finally {
     rl.close();
@@ -139,7 +142,7 @@ export async function deviceLogin(server: string, options: { name: string; onCod
     });
     if (poll.status === 'approved' && poll.token) return { token: poll.token, username: poll.username || '' };
   }
-  throw new Error('The login code expired. Run sublet login again.');
+  throw new Error('The login code expired. Run sublera login again.');
 }
 
 function announceLoginCode(code: DeviceLoginCode, flags: GlobalFlags): void {
@@ -172,10 +175,10 @@ async function saveHostKey(server: string, token: string, flags: GlobalFlags): P
 export async function readyConfig(flags: GlobalFlags, logger: Logger): Promise<AgentConfig> {
   const cfg = await resolvedConfig(flags, false);
   if (cfg.token) return cfg;
-  if (flags.nonInteractive) throw new UsageError('No host key in non-interactive mode. Run sublet login once, or set SUBLET_KEY.');
+  if (flags.nonInteractive) throw new UsageError('No host key in non-interactive mode. Run sublera login once, or set SUBLET_KEY.');
   logger.info(`This computer is not connected to ${BRAND} yet. Connect it first.`);
   const linked = await deviceLogin(cfg.server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
-  if (!linked) throw new Error('No host key. Run: sublet login, or pass --key <key>');
+  if (!linked) throw new Error('No host key. Run: sublera login, or pass --key <key>');
   const { cfg: saved, me } = await saveHostKey(cfg.server, linked.token, flags);
   logger.success(`Connected as @${me?.user.username || linked.username}`, { config: configPath() });
   return { ...saved, wsPath: cfg.wsPath };
@@ -196,8 +199,8 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
     output.write(`${JSON.stringify({ ok: true, server, username: me?.user.username || null, config: configPath() })}\n`);
   } else {
     logger.success(`Saved host key for ${me?.user.username ? `@${me.user.username}` : 'this machine'}`, { config: configPath() });
-    if (!me) logger.warn('The server does not expose /api/agent/me yet. The key is saved, but verify it with: sublet doctor');
-    output.write(`\n${BRAND} agent is configured. Next: sublet start\n`);
+    if (!me) logger.warn('The server does not expose /api/agent/me yet. The key is saved, but verify it with: sublera doctor');
+    output.write(`\n${BRAND} agent is configured. Next: sublera start\n`);
   }
   return 0;
 }
@@ -242,7 +245,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
       checks.push(check('Host key', 'fail', error instanceof Error ? error.message : String(error)));
     }
   } else {
-    checks.push(check('Host key', 'warn', 'Not saved. Run: sublet login'));
+    checks.push(check('Host key', 'warn', 'Not saved. Run: sublera login'));
   }
 
   try {
@@ -278,9 +281,18 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
 
   let install = await findExistingLlama({ env: process.env });
   if (!install && flags.fix) {
-    const result = await ensureLlamaServer({ fix: true, gpu, logger, showProgress: true, requireChecksum: flags.requireChecksum, simulation: false });
-    if (result.found) install = result.install;
-    else checks.push(check('llama-server', 'fail', result.reason));
+    try {
+      const release = await acquireInstanceLock();
+      try {
+        const result = await ensureLlamaServer({ fix: true, gpu, logger, showProgress: true, requireChecksum: flags.requireChecksum, simulation: false });
+        if (result.found) install = result.install;
+        else checks.push(check('llama-server', 'fail', result.reason));
+      } finally {
+        await release();
+      }
+    } catch (error) {
+      checks.push(check('llama-server', 'fail', toError(error).message));
+    }
   }
   if (install) {
     const own = install.source === 'env' || install.source === 'path';
@@ -289,7 +301,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
       : install.verified ? 'checksum verified' : 'local hash recorded, no published checksum';
     checks.push(check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${install.variant} · ${trust}`}`));
   } else if (!flags.fix) {
-    checks.push(check('llama-server', 'warn', `Not installed. Run: sublet doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
+    checks.push(check('llama-server', 'warn', `Not installed. Run: sublera doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
   }
 
   const models = await listModels();
@@ -306,7 +318,7 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
       output.write(`${mark} ${padRight(item.name, 15)} ${item.detail}\n`);
     }
     output.write(`\n${failures.length ? `${failures.length} check(s) failed.` : 'All blocking checks passed.'}\n`);
-    if (!flags.fix && !install) output.write(`Tip: sublet doctor --fix downloads the matching llama-server build.\n`);
+    if (!flags.fix && !install) output.write(`Tip: sublera doctor --fix downloads the matching llama-server build.\n`);
   }
   return failures.length ? 1 : 0;
 }
@@ -350,13 +362,14 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
     json: flags.json,
     once: flags.once,
     requireChecksum: flags.requireChecksum,
+    drainTimeoutMs: flags.drainTimeoutMs,
   });
   return await runAgent(agent, logger, requestId);
 }
 
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
   const model = flags.model || flags.positionals[0];
-  if (!model) throw new UsageError('Usage: sublet host <huggingface-gguf-url|path.gguf> --price 0.25');
+  if (!model) throw new UsageError('Usage: sublera host <huggingface-gguf-url|path.gguf> --price 0.25');
   // Fail before model inspection or download when unattended credentials are missing.
   const cfg = await readyConfig(flags, logger);
   if (!flags.simulation && !/^https?:\/\//i.test(model)) {
@@ -399,13 +412,14 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
     json: flags.json,
     once: flags.once,
     requireChecksum: flags.requireChecksum,
+    drainTimeoutMs: flags.drainTimeoutMs,
   });
   return await runAgent(agent, logger);
 }
 
 type RejectedEvent = { requestId: string; reason: string; wasActive: boolean };
 
-/** With a target request (`sublet start <code>`), the agent exits when that request ends. */
+/** With a target request (`sublera start <code>`), the agent exits when that request ends. */
 async function runAgent(agent: Agent, logger: Logger, target: string | null = null): Promise<number> {
   let stopping = false;
   let exitCode = 0;
@@ -414,7 +428,8 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
     if (stopping) return;
     stopping = true;
     exitCode = code;
-    await agent.stop(preserveState);
+    if (preserveState && code === EXIT.TERMINATED) await agent.drain();
+    else await agent.stop(preserveState);
   };
   const onInterrupt = () => { void stop(130); };
   // Shutdowns and service managers send SIGTERM; keep state.json so the next start can reattach to the booking.
@@ -436,7 +451,7 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
       const mine = job?.kind === 'request' && job.id === target;
       if (mine && job.timerEndsAt) served = true;
       if (served && (!mine || Date.now() > (job?.timerEndsAt ?? 0) + 3_000)) {
-        logger.success(`Booking ${target} finished. Run sublet start to stay online for public calls.`);
+        logger.success(`Booking ${target} finished. Run sublera start to stay online for public calls.`);
         void stop(0);
       }
     }, 1_000);
@@ -526,13 +541,15 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
     json: flags.json,
     once: false,
     requireChecksum: flags.requireChecksum,
+    drainTimeoutMs: flags.drainTimeoutMs,
   });
   let finished = false;
   let signalCode: number | null = null;
   const stop = async (preserveState = false) => {
     if (finished) return;
     finished = true;
-    await agent.stop(preserveState);
+    if (preserveState) await agent.drain();
+    else await agent.stop();
   };
   // Same contract as start/host: Ctrl+C clears saved state (130); SIGTERM keeps it for the next start (143).
   const onInterrupt = () => { signalCode = EXIT.INTERRUPTED; void stop(); };
@@ -629,7 +646,7 @@ async function claimRequest(cfg: AgentConfig, requestId: string, quiet = false):
     });
     if (!quiet) {
       output.write(`Claimed ${requestId}${result.status ? ` (${result.status})` : ''}.\n`);
-      output.write('The running `sublet start` agent will download and verify the model, then the server starts the clock after the model check.\n');
+      output.write('The running `sublera start` agent will download and verify the model, then the server starts the clock after the model check.\n');
     }
     return result;
   } catch (error) {
@@ -648,7 +665,7 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
     return 0;
   }
   if (!me) {
-    logger.warn('Server does not expose /api/agent/me. Try: sublet doctor');
+    logger.warn('Server does not expose /api/agent/me. Try: sublera doctor');
     return 0;
   }
   const host = me.host;
@@ -670,7 +687,7 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
 }
 
 /**
- * `sublet config` (or `config show`): the settings this agent will actually use and where each one came from.
+ * `sublera config` (or `config show`): the settings this agent will actually use and where each one came from.
  * `config path` prints the agent.json path. Secrets are always masked.
  */
 export async function cmdConfig(flags: GlobalFlags, _logger: Logger, resolved: ResolvedSettings): Promise<number> {
@@ -679,7 +696,7 @@ export async function cmdConfig(flags: GlobalFlags, _logger: Logger, resolved: R
     output.write(flags.json ? `${JSON.stringify({ settings: resolved.file, config: configPath(), home: subletHome() })}\n` : `${resolved.file}\n`);
     return EXIT.OK;
   }
-  if (sub !== 'show') throw new UsageError(`Unknown config action "${sub}". Use: sublet config [show|path]`);
+  if (sub !== 'show') throw new UsageError(`Unknown config action "${sub}". Use: sublera config [show|path]`);
   const saved = await readConfigFile();
   const rows = SETTINGS_SPEC.map((row) => {
     let value: unknown = resolved.values[row.key];
@@ -695,7 +712,7 @@ export async function cmdConfig(flags: GlobalFlags, _logger: Logger, resolved: R
     if (row.key === 'wsPath' && value === undefined) value = saved?.wsPath || DEFAULT_WS_PATH;
     if (row.key === 'logFile' && value === undefined) value = join(logsDir(), 'agent.log');
     const shown = row.secret ? maskToken(typeof value === 'string' ? value : null) : value ?? null;
-    return { key: row.key, env: row.env, value: shown, source };
+    return { key: row.key, env: row.env.replace(/^SUBLET_/, 'SUBLERA_'), value: shown, source };
   });
   const proxy = proxySettings();
   const network = {
@@ -733,15 +750,17 @@ export function globalHelp(): string {
   return [
     `${BRAND} GPU Terminal Agent v${VERSION}`,
     '',
-    'Usage: sublet <command> [options]',
+    'Usage: sublera <command> [options]',
     '',
     'Commands:',
-    '  login                 Link this computer to your Sublet account (opens the website)',
+    '  login                 Link this computer to your Sublera account (opens the website)',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
     '  start [code]          Connect and serve (connects this computer on the first run); with a code, serve that request',
     '  host <gguf>           Serve a public pay-per-token model',
     '  jobs                  Browse and claim buyer requests from the terminal',
     '  status                Show this host, wallet, and active booking',
+    '  health [live|ready]    Local fresh process/serving readiness (JSON; no server attestation)',
+    '  storage [status|prune] Inspect storage; prune previews old partials (--force applies)',
     '  config [show|path]    Show the settings in use and where each came from',
     '  logout                Remove the saved host key',
     '',
@@ -763,28 +782,30 @@ export function globalHelp(): string {
     '  --require-checksum    Fail if llama-server has no published SHA-256',
     '  --no-browser          login: print the link instead of opening a browser',
     '  --non-interactive     Never prompt or start device login; requires a configured host key',
+    '  --drain-timeout <ms>  SIGTERM inference grace period (default 30000, max 300000)',
     '  --claim <request-id>  Claim a board request non-interactively',
     '  --json                Machine-readable output',
     '  --verbose             Debug logs (same as --log-level debug)',
     '  --log-level <level>   debug, info, warn, error, or silent',
-    '  --log-file <path|off> Agent log file (start/host/jobs default: ~/.sublet/logs/agent.log)',
+    '  --log-file <path|off> Agent log file (start/host/jobs default: ~/.sublera/logs/agent.log)',
     '  --no-color            Disable ANSI colors',
     '  --no-install          Do not auto-download llama-server',
     '  --once                Exit after the first public job (testing)',
     '  --help, --version',
     '',
     'Examples:',
-    '  sublet login',
-    '  sublet login --key sh_...          (machines without a browser)',
-    '  sublet doctor --fix',
-    '  sublet start',
-    '  sublet start r_abc123             (the command from Take on the website)',
-    '  sublet start --simulation --gpu "RTX 4060" --vram 8188',
-    '  sublet host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
-    '  sublet jobs',
+    '  sublera login',
+    '  sublera login --key sh_...          (machines without a browser)',
+    '  sublera doctor --fix',
+    '  sublera start',
+    '  sublera start r_abc123             (the command from Take on the website)',
+    '  sublera start --simulation --gpu "RTX 4060" --vram 8188',
+    '  sublera host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
+    '  sublera jobs',
     '',
-    'Supported hosting settings can also come from SUBLET_* variables or',
-    '~/.sublet/agent.json (see: sublet config). Proxies: HTTPS_PROXY, NO_PROXY,',
+    'Supported hosting settings can also come from SUBLERA_* variables or',
+    'legacy SUBLET_* aliases (SUBLERA_* wins when both are set).',
+    '~/.sublera/agent.json (see: sublera config). Proxies: HTTPS_PROXY, NO_PROXY,',
     'NODE_EXTRA_CA_CERTS. Exit codes: 0 ok, 1 error, 2 usage, 130 Ctrl+C, 143 SIGTERM.',
   ].join('\n');
 }

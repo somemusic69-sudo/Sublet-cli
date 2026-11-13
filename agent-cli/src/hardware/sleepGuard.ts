@@ -111,7 +111,7 @@ export class SleepGuard {
   private startLinux(reason: string): boolean {
     const child = this.spawnFn('systemd-inhibit', [
       '--what=sleep:idle',
-      '--who=sublet-cli',
+      '--who=sublera-cli',
       `--why=${reason.slice(0, 80)}`,
       'tail', `--pid=${process.pid}`, '-f', '/dev/null',
     ], { stdio: 'ignore' });

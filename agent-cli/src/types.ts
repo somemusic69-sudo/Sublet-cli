@@ -69,7 +69,7 @@ export type HelloPayload = {
   priceOutUsd: number;
   simulate: boolean;
   publicMode: boolean;
-  /** Set by `sublet start <code>`: the request this agent wants to serve. */
+  /** Set by `sublera start <code>`: the request this agent wants to serve. */
   requestId?: string | null;
   cachedModels?: CachedModelInfo[];
 };

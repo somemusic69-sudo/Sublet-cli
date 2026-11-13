@@ -84,7 +84,7 @@ export function rejectModelFile(file: string): string | null {
   }
   if (lower.endsWith('.gguf')) return null;
   if (/\.(bin|pkl|pickle|pt|pth|safetensors|onnx|ggml|ckpt)$/.test(lower)) {
-    return 'Sublet only runs GGUF weights. Pickle and PyTorch files can execute code on a host PC, so they are refused.';
+    return 'Sublera only runs GGUF weights. Pickle and PyTorch files can execute code on a host PC, so they are refused.';
   }
   return 'Model file must be a .gguf from HuggingFace.';
 }

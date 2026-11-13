@@ -80,7 +80,7 @@ test('device login stops with the server message when the code is no longer vali
       return;
     }
     res.statusCode = 410;
-    res.end(JSON.stringify({ error: 'This login code expired. Run sublet login again.' }));
+    res.end(JSON.stringify({ error: 'This login code expired. Run sublera login again.' }));
   }, async (base) => {
     await assert.rejects(deviceLogin(base, { name: 'pc', onCode: () => undefined }), /expired/);
   });

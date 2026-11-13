@@ -1,8 +1,8 @@
 {
-  "name": "sublet-cli",
+  "name": "sublera-cli",
   "version": "1.3.0",
-  "description": "Sublet GPU host terminal agent: run llama.cpp, serve metered tokens, and survive overnight bookings.",
-  "author": "Sublet contributors",
+  "description": "Sublera GPU host terminal agent: run llama.cpp, serve metered tokens, and survive overnight bookings.",
+  "author": "Sublera contributors",
   "homepage": "https://github.com/somemusic69-sudo/Sublet-cli#readme",
   "repository": {
     "type": "git",
@@ -14,6 +14,8 @@
   },
   "type": "module",
   "bin": {
+    "sublera": "dist/index.js",
+    "sublera-cli": "dist/index.js",
     "sublet": "dist/index.js",
     "sublet-cli": "dist/index.js"
   },
@@ -32,7 +34,7 @@
     "node": ">=20.18.1"
   },
   "keywords": [
-    "sublet",
+    "sublera",
     "gpu",
     "llama.cpp",
     "gguf",

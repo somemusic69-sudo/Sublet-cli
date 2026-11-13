@@ -239,7 +239,7 @@ export async function streamChat(llamaUrl: string, job: ProxyJob, options: Strea
 export function simulateReply(prompt: string, model: string): string {
   const q = prompt.replace(/\s+/g, ' ').trim();
   const short = q.length > 180 ? `${q.slice(0, 180)}.` : q;
-  if (!q) return 'Sublet simulator is ready. Send a prompt and every streamed token is metered by the central server.';
+  if (!q) return 'Sublera simulator is ready. Send a prompt and every streamed token is metered by the central server.';
   if (/```|function|def |class |sql|python|typescript|javascript|regex/i.test(q)) {
     return [
       'Here is a small, explicit sketch you can replace:',
@@ -251,13 +251,13 @@ export function simulateReply(prompt: string, model: string): string {
       '}',
       '```',
       '',
-      `Simulated by Sublet on ${model}. A live GPU would run the real GGUF weights.`,
+      `Simulated by Sublera on ${model}. A live GPU would run the real GGUF weights.`,
     ].join('\n');
   }
   return [
     `On ${model}, the useful reading of that prompt is: ${short || 'a short request'}.`,
     'This node is in simulation mode: the stream, the meter, and the wallet are real, while the words are a stand-in.',
-    'Run sublet doctor, install llama-server, and drop --simulation for real GGUF output.',
+    'Run sublera doctor, install llama-server, and drop --simulation for real GGUF output.',
   ].join(' ');
 }
 
@@ -268,7 +268,7 @@ export function simulatedPosition(token: string): TokenPosition {
 
 export async function simulateChat(job: ProxyJob, options: { signal?: AbortSignal; tokPerSec?: number; onChunk?: ChunkHandler } = {}): Promise<StreamResult> {
   const prompt = job.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n');
-  const text = simulateReply(prompt, job.model || 'sublet-simulator');
+  const text = simulateReply(prompt, job.model || 'sublera-simulator');
   const pieces = text.split(/(\s+)/).filter((piece) => piece.length > 0);
   const started = Date.now();
   let sent = '';

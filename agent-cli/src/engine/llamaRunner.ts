@@ -40,7 +40,7 @@ export type LlamaProps = {
 export function buildLlamaArgs(options: Pick<LlamaRunnerOptions, 'modelPath' | 'context' | 'slots' | 'host' | 'port' | 'gpuLayers' | 'extraArgs'>): string[] {
   const slots = Math.max(1, Math.round(options.slots ?? 1));
   // llama-server treats --ctx-size as the total KV cache and divides it across
-  // parallel slots. Sublet advertises the per-slot context, so allocate slots * ctx.
+  // parallel slots. Sublera advertises the per-slot context, so allocate slots * ctx.
   const totalContext = Math.max(256, Math.round(options.context)) * slots;
   const args = [
     '-m', options.modelPath,
@@ -153,7 +153,7 @@ export class LlamaRunner extends EventEmitter {
     this.logStream = createWriteStream(logFile, { flags: 'a' });
     const { env, dropped } = engineEnv(process.env, this.options.env);
     if (dropped.length && this._restarts === 0) {
-      this.logger?.warn(`Ignoring your llama.cpp settings for this engine: ${dropped.join(', ')}. Sublet runs llama-server with fixed flags.`);
+      this.logger?.warn(`Ignoring your llama.cpp settings for this engine: ${dropped.join(', ')}. Sublera runs llama-server with fixed flags.`);
     }
     const child = spawn(this.options.binaryPath, args, {
       env,

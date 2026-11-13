@@ -21,7 +21,7 @@ body:
       label: Reproduction
       description: Exact command, request state (idle/loading/booking), and steps.
       placeholder: |
-        sublet start ...
+        sublera start ...
         1. ...
     validations:
       required: true
@@ -29,7 +29,7 @@ body:
     id: version
     attributes:
       label: Agent version
-      placeholder: "sublet --version"
+      placeholder: "sublera --version"
     validations:
       required: true
   - type: input

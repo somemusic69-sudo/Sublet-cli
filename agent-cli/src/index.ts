@@ -8,6 +8,8 @@ import { EXIT, UsageError } from './exitCodes.js';
 import { applySettings, type ResolvedSettings } from './settings.js';
 import { installFetchProxy } from './network/proxy.js';
 import { colorEnabled } from './util/format.js';
+import { readHealth } from './health.js';
+import { storageAction, storageReport } from './storageCommand.js';
 import {
   cmdConfig,
   cmdDoctor,
@@ -59,10 +61,11 @@ const VALUE_FLAGS: Record<string, keyof GlobalFlags> = {
   '--timeout': 'timeoutMs',
   '--log-level': 'logLevel',
   '--log-file': 'logFile',
+  '--drain-timeout': 'drainTimeoutMs',
 };
 
-const NUMERIC = new Set<keyof GlobalFlags>(['context', 'slots', 'price', 'priceIn', 'priceOut', 'vram', 'tokPerSec', 'timeoutMs']);
-const INTEGER = new Set<keyof GlobalFlags>(['context', 'slots', 'vram']);
+const NUMERIC = new Set<keyof GlobalFlags>(['context', 'slots', 'price', 'priceIn', 'priceOut', 'vram', 'tokPerSec', 'timeoutMs', 'drainTimeoutMs']);
+const INTEGER = new Set<keyof GlobalFlags>(['context', 'slots', 'vram', 'drainTimeoutMs']);
 
 function numberFlag(name: string, raw: string, integer: boolean): number {
   const value = raw.trim() ? Number(raw) : Number.NaN;
@@ -144,7 +147,7 @@ function logFileFor(command: string, flags: GlobalFlags): LogFile | null {
   return new LogFile({ path: setting || join(logsDir(), 'agent.log') });
 }
 
-const COMMANDS = new Set(['login', 'doctor', 'start', 'host', 'jobs', 'status', 'logout', 'config']);
+const COMMANDS = new Set(['login', 'doctor', 'start', 'host', 'jobs', 'status', 'logout', 'config', 'health', 'storage']);
 
 function reportError(error: unknown, json: boolean, code: number): void {
   const message = redactSecrets(error instanceof Error ? error.message : String(error));
@@ -172,7 +175,7 @@ async function main(): Promise<number> {
     return EXIT.OK;
   }
   if (!COMMANDS.has(command)) {
-    reportError(new UsageError(`Unknown command: ${command}. Run sublet --help.`), flags.json, EXIT.USAGE);
+    reportError(new UsageError(`Unknown command: ${command}. Run sublera --help.`), flags.json, EXIT.USAGE);
     return EXIT.USAGE;
   }
   let resolved: ResolvedSettings;
@@ -180,7 +183,7 @@ async function main(): Promise<number> {
     // SUBLET_* variables and agent.json fill in every flag that was not typed.
     resolved = applySettings(flags, explicit);
     // config and logout are local recovery commands; a broken proxy must not prevent them.
-    if (command !== 'config' && command !== 'logout') await installFetchProxy();
+    if (!['config', 'logout', 'health', 'storage'].includes(command)) await installFetchProxy();
   } catch (error) {
     reportError(error, flags.json, EXIT.USAGE);
     return EXIT.USAGE;
@@ -195,6 +198,18 @@ async function main(): Promise<number> {
   if (logger.file) logger.debug(`${BRAND} agent v${VERSION} ${command}`, { node: process.versions.node, platform: `${process.platform}/${process.arch}`, pid: process.pid });
   try {
     switch (command) {
+      case 'health': {
+        if (flags.positionals.length > 1 || (flags.positionals[0] && !['live', 'ready'].includes(flags.positionals[0]))) throw new UsageError('Usage: sublera health [live|ready] [--json]');
+        const health = await readHealth();
+        process.stdout.write(`${JSON.stringify(health)}\n`);
+        return (flags.positionals[0] === 'live' ? health.live : health.ready) ? EXIT.OK : EXIT.ERROR;
+      }
+      case 'storage': {
+        const action = storageAction(flags.positionals, flags.force);
+        const report = await storageReport(action.prune, action.apply);
+        process.stdout.write(`${JSON.stringify(report, null, flags.json ? undefined : 2)}\n`);
+        return EXIT.OK;
+      }
       case 'login': return await cmdLogin(flags, logger);
       case 'doctor': return await cmdDoctor(flags, logger);
       case 'start': return await cmdStart(flags, logger);
@@ -215,7 +230,7 @@ async function main(): Promise<number> {
   }
 }
 
-const invoked = process.argv[1] && (process.argv[1].endsWith('index.js') || process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('sublet-cli') || process.argv[1].endsWith('sublet'));
+const invoked = process.argv[1] && (process.argv[1].endsWith('index.js') || process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('sublera-cli') || process.argv[1].endsWith('sublera') || process.argv[1].endsWith('sublet-cli') || process.argv[1].endsWith('sublet'));
 if (invoked) {
   let fatal = false;
   let fatalTimer: NodeJS.Timeout | undefined;

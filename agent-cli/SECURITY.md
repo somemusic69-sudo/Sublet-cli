@@ -23,19 +23,22 @@ We will acknowledge the report and coordinate a fix and disclosure date.
   `sh_`/`sk-` keys, `Bearer` values, and `token=` parameters are replaced with
   `***`. The agent log file is created with mode 0600. Prompts and model
   output are never logged.
-- `SUBLET_KEY` is supported for fleets and containers. Prefer a secret store
+- `SUBLERA_KEY` is supported for fleets and containers; legacy `SUBLET_KEY`
+  remains supported, with `SUBLERA_KEY` winning when both are set. The default
+  `~/.sublet` intentionally shares credentials, cache, and the instance lock
+  across old and new command aliases. Prefer a secret store
   (systemd `LoadCredential`, Docker secrets, a CI secret) over a plain shell
-  profile. `sublet config` always shows the key masked.
+  profile. `sublera config` always shows the key masked.
 
 ## Network
 
-- The agent only makes outbound connections: the Sublet server (HTTPS and one
+- The agent only makes outbound connections: the Sublera server (HTTPS and one
   WebSocket), `huggingface.co`/`hf.co` and its CDN for models,
   `api.github.com`/`github.com` for llama.cpp releases, and
   `registry.npmjs.org` for the version check. The engine opens a loopback-only
   HTTP port; the agent does not expose a public listening port by default.
 - With `HTTPS_PROXY` set, the tunnel uses HTTP CONNECT, so TLS runs end to end
-  between the agent and the Sublet server for HTTPS/WSS destinations. A normal
+  between the agent and the Sublera server for HTTPS/WSS destinations. A normal
   forwarding proxy sees destination and traffic metadata, not encrypted content.
   An authorized TLS-inspecting proxy with a trusted root CA can read host keys
   and content. HTTP/WS destinations are not end-to-end encrypted. Corporate roots

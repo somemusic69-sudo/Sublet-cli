@@ -1,9 +1,20 @@
-# Terminal Agent CLI (`npx`) — Dedicated Architecture & Build Plan
+# Sublera Terminal Agent CLI — Dedicated Architecture & Build Plan
+
+> **Naming and availability:** The local package name is `sublera-cli`; npm
+> availability is unverified. `npx sublera-cli` examples in this plan are
+> conditional on a separately verified publication, not a claim that one exists.
+> No new domain, repository, or package publication is claimed. The actual
+> repository remains `somemusic69-sudo/Sublet-cli` and the actual server remains
+> `https://sublet.duckdns.org`. Old `sublet` / `sublet-cli` aliases and `SUBLET_*`
+> variables remain supported; `SUBLERA_*` wins when both environment names are set.
+> The default `~/.sublet` intentionally stays unchanged to share credentials,
+> cache, and the instance lock; model `.sublet.json` metadata also stays unchanged.
+> See the [migration guide](agent-cli/README.md#migration-from-sublet).
 
 > **Why Keep the CLI Separate?**
 > Mixing the Website/Server code and the Host Terminal Agent into one project is messy because they run on completely different machines:
 > * **Your Central Server** runs in the cloud (manages the website, database, wallets, and API routing).
-> * **The Terminal Agent CLI** runs on the **GPU Host's PC / Mini-Datacenter** (downloaded via `npx sublet-cli` to control their GPU, `llama.cpp`, and model files).
+> * **The Terminal Agent CLI** runs on the **GPU Host's PC / Mini-Datacenter** (downloaded via `npx sublera-cli` to control their GPU, `llama.cpp`, and model files).
 >
 > Keeping the CLI as its own clean, standalone package makes it easy to publish to `npm`, easy to update, and rock-solid for 8-hour overnight jobs.
 
@@ -13,7 +24,7 @@
 
 ```text
 agent-cli/
-├── package.json              # Configured with "bin" so `npx sublet-cli` works out of the box
+├── package.json              # Configured with "bin" so `npx sublera-cli` works out of the box
 ├── tsconfig.json
 └── src/
     ├── index.ts              # CLI entry point (parses commands: login, start, host, jobs, doctor)
@@ -43,11 +54,11 @@ All files downloaded on the Host's PC stay neatly inside one folder (`~/.sublet/
 
 | Command | What It Does |
 | :--- | :--- |
-| `npx sublet-cli login` | Asks for the Host's token from your website, verifies it, and saves it locally. |
-| `npx sublet-cli doctor` | Scans the machine: prints GPU model, Total/Free VRAM, OS, internet speed, and downloads `llama-server` if missing. |
-| `npx sublet-cli start` | **Main Mode (Web-Synced Standby):** Connects to your website and waits. When the host clicks **"Run Request"** on your website (e.g., an 8-hour overnight job), this terminal automatically downloads the `.gguf` and starts running it! |
-| `npx sublet-cli jobs` | Lets mini-datacenter / Linux SSH hosts browse and accept 8-hour Buyer Requests **directly inside the terminal** without needing a browser. |
-| `npx sublet-cli host <hf-url> --price 0.25` | Starts **Public Pay-Per-Token Mode** directly from the terminal with a chosen `.gguf` model and price per 1M tokens. |
+| `npx sublera-cli login` | Asks for the Host's token from your website, verifies it, and saves it locally. |
+| `npx sublera-cli doctor` | Scans the machine: prints GPU model, Total/Free VRAM, OS, internet speed, and downloads `llama-server` if missing. |
+| `npx sublera-cli start` | **Main Mode (Web-Synced Standby):** Connects to your website and waits. When the host clicks **"Run Request"** on your website (e.g., an 8-hour overnight job), this terminal automatically downloads the `.gguf` and starts running it! |
+| `npx sublera-cli jobs` | Lets mini-datacenter / Linux SSH hosts browse and accept 8-hour Buyer Requests **directly inside the terminal** without needing a browser. |
+| `npx sublera-cli host <hf-url> --price 0.25` | Starts **Public Pay-Per-Token Mode** directly from the terminal with a chosen `.gguf` model and price per 1M tokens. |
 
 ---
 
@@ -110,7 +121,7 @@ Instead of ugly scrolling logs, the CLI prints a clean, live-updating terminal b
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ⚡ SUBLET GPU TERMINAL AGENT v1.0.0               STATUS: ● ONLINE │
+│  ⚡ SUBLERA GPU TERMINAL AGENT v1.0.0               STATUS: ● ONLINE │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Host Endpoint : https://alex.[webname].com/api/v1                   │
 │  Reliability   : 98.5% (SAFE — Auto-ban threshold: < 90.0%)          │

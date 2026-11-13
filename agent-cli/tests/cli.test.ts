@@ -28,6 +28,20 @@ function cli(dir: string, args: string[], extra: NodeJS.ProcessEnv = {}): Promis
   });
 }
 
+test('help and command errors advertise Sublera commands', async (t) => {
+  const dir = await home(t);
+  const help = await cli(dir, ['--help']);
+  assert.equal(help.code, 0, help.err);
+  assert.match(help.out, /Sublera GPU Terminal Agent/);
+  assert.match(help.out, /Usage: sublera <command>/);
+  assert.match(help.out, /sublera login/);
+  assert.match(help.out, /sublera doctor --fix/);
+  assert.doesNotMatch(help.out, /\bsublet (?:login|doctor|start|host|jobs|config)\b/i);
+  const unknown = await cli(dir, ['unknown', '--json']);
+  assert.equal(unknown.code, 2);
+  assert.match(JSON.parse(unknown.out).error, /Run sublera --help/);
+});
+
 test('unattended commands fail fast without starting browser login', async (t) => {
   const dir = await home(t);
   for (const command of [['start'], ['login'], ['host', 'https://huggingface.co/a/b/resolve/main/x.gguf']]) {
@@ -88,4 +102,17 @@ test('server and tunnel URLs reject embedded credentials and cross-origin forwar
   assert.throws(() => wsUrl('https://server.test', 'sh_secret', 'wss://other.test/tunnel'), /same server origin/);
   assert.throws(() => wsUrl('https://server.test', 'sh_secret', 'ws://server.test/tunnel'), /same server origin/);
   assert.equal(wsUrl('https://server.test', 'sh_secret', 'wss://server.test/custom', 'header'), 'wss://server.test/custom');
+});
+
+test('local operational commands do not require a proxy and maintenance is dry-run by default', async (t) => {
+  const dir = await home(t);
+  const extra = { HTTPS_PROXY: 'invalid-proxy' };
+  const storage = await cli(dir, ['storage', 'prune', '--json'], extra);
+  assert.equal(storage.code, 0, storage.err);
+  assert.equal(JSON.parse(storage.out).dryRun, true);
+  const health = await cli(dir, ['health', '--json'], extra);
+  assert.equal(health.code, 1);
+  assert.equal(JSON.parse(health.out).ok, false);
+  const invalid = await cli(dir, ['start', '--drain-timeout=300001', '--json']);
+  assert.equal(invalid.code, 2);
 });

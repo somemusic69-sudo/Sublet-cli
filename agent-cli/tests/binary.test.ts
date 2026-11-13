@@ -1,12 +1,98 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { acquireInstanceLock } from '../src/util/instanceLock.js';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
 import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary, ensureLlamaServer } from '../src/engine/binaryManager.js';
+
+test('concurrent installs serialize per home, reuse validated installs, and retain all manifest entries', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-concurrent-bin-'));
+  let unlock: (() => Promise<void>) | undefined;
+  t.after(async () => { await unlock?.(); await rm(home, { recursive: true, force: true }); });
+  const bytes = zipWith('bin/llama-server', 'concurrent engine');
+  const { server, base, requests } = await serveFiles({ '/main.zip': bytes });
+  t.after(() => { server.close(); });
+  const env = { ...process.env, SUBLET_HOME: home };
+  const options = {
+    env, platform: 'linux' as const, arch: 'x64', showProgress: false,
+    release: { tag_name: 'b-concurrent', assets: [{ name: 'llama-bin-ubuntu-x64.zip', browser_download_url: `${base}/main.zip`, digest: `sha256:${sha256(bytes)}` }] },
+  };
+  // Installation must also work for the agent, which already owns this lock.
+  unlock = await acquireInstanceLock(env);
+  const installs = await Promise.all([
+    installLlamaServer(options), installLlamaServer(options),
+    installLlamaServer({ ...options, version: 'other' }),
+  ]);
+  assert.equal(requests(), 2);
+  assert.equal(installs[0].path, installs[1].path);
+  assert.equal(installs[1].source, 'manifest');
+  for (const install of installs) assert.equal(await verifyInstalledBinary(install), true);
+  const manifest = JSON.parse(await readFile(join(home, 'bin', 'manifest.json'), 'utf8'));
+  assert.equal(manifest.installs.length, 2);
+  assert.equal(manifest.latest, installs[2].path);
+  assert.deepEqual((await readdir(join(home, 'bin'))).filter((name) => /\.(tmp|bak)$/.test(name)), []);
+  assert.deepEqual((await readdir(join(home, 'cache'))).filter((name) => name.startsWith('install-')), []);
+});
+
+test('failed replacement preserves the previous install and does not poison the install queue', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-replace-bin-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bytes = zipWith('llama-server', 'previous engine');
+  const invalid = zipWith('README', 'not an engine');
+  const { server, base } = await serveFiles({ '/main.zip': bytes, '/invalid.zip': invalid });
+  t.after(() => { server.close(); });
+  const env = { ...process.env, SUBLET_HOME: home };
+  const options = {
+    env, platform: 'linux' as const, arch: 'x64', showProgress: false,
+    release: { tag_name: 'b-replace', assets: [{ name: 'llama-bin-ubuntu-x64.zip', browser_download_url: `${base}/main.zip` }] },
+  };
+  const first = await installLlamaServer(options);
+  const manifestPath = join(home, 'bin', 'manifest.json');
+  const before = await readFile(manifestPath, 'utf8');
+  await assert.rejects(installLlamaServer({ ...options, requireChecksum: true, release: {
+    tag_name: 'b-replace', assets: [{ name: 'llama-bin-ubuntu-x64.zip', browser_download_url: `${base}/invalid.zip`, digest: `sha256:${sha256(invalid)}` }],
+  } }), /No llama-server binary/);
+  assert.equal(await readFile(first.path, 'utf8'), 'previous engine');
+  assert.equal(await readFile(manifestPath, 'utf8'), before);
+  // Fail manifest commit after promotion to exercise rollback of the old directory.
+  await rm(manifestPath);
+  await mkdir(manifestPath);
+  await assert.rejects(installLlamaServer(options));
+  assert.equal(await readFile(first.path, 'utf8'), 'previous engine');
+  await rm(manifestPath, { recursive: true });
+  assert.equal(await verifyInstalledBinary(await installLlamaServer(options)), true);
+});
+
+test('doctor --fix respects an existing instance lock before any engine mutations', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-doctor-lock-'));
+  const release = await acquireInstanceLock({ SUBLET_HOME: home });
+  t.after(async () => { await release(); await rm(home, { recursive: true, force: true }); });
+  const commands = new URL('../src/commands.ts', import.meta.url).href;
+  const logger = new URL('../src/logger.ts', import.meta.url).href;
+  const code = `
+    import { cmdDoctor } from ${JSON.stringify(commands)};
+    import { Logger } from ${JSON.stringify(logger)};
+    globalThis.fetch = async () => new Response('{}', { status: 200 });
+    process.exitCode = await cmdDoctor({ fix: true, json: true, requireChecksum: false }, new Logger({ level: 'silent' }));
+  `;
+  const result = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+    cwd: fileURLToPath(new URL('../', import.meta.url)),
+    env: { ...process.env, SUBLET_HOME: home, PATH: '', LLAMA_SERVER: '', SUBLET_KEY: '' },
+    timeout: 30_000,
+  }).then(() => { throw new Error('doctor should report failure'); }, (error) => error);
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.match(report.checks.find((item: { name: string }) => item.name === 'llama-server').detail, /SUBLET_HOME is locked/);
+  assert.deepEqual(await readdir(home), ['agent.lock']);
+});
+
 
 test('strict checksum mode refuses an existing custom engine without downloading', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'sublet-strict-engine-'));

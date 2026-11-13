@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { brandEnv } from './util/env.js';
 
 export type AgentConfig = {
   server: string;
@@ -10,7 +11,9 @@ export type AgentConfig = {
 };
 
 export function subletHome(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.SUBLET_HOME && env.SUBLET_HOME.trim() ? env.SUBLET_HOME : join(homedir(), '.sublet'));
+  const home = brandEnv(env, 'SUBLET_HOME');
+  // Keep the existing default so old/new binaries share credentials and ownership.
+  return resolve(home && home.trim() ? home : join(homedir(), '.sublet'));
 }
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {

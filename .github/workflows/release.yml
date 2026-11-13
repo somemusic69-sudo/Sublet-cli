@@ -1,5 +1,7 @@
 name: Release
 
+# Artifact branding is sublera-cli; npm availability is unverified.
+# This rename does not claim a new domain, repository, or completed publication.
 # Publishing happens only here, never from a laptop. Push a tag that matches
 # agent-cli/package.json (for example v1.3.0) and this workflow verifies,
 # publishes to npm with provenance, and creates the GitHub release.
@@ -69,7 +71,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Software bill of materials
-        run: npm sbom --sbom-format cyclonedx --omit dev > "sublet-cli-${GITHUB_REF_NAME}.cdx.json"
+        run: npm sbom --sbom-format cyclonedx --omit dev > "sublera-cli-${GITHUB_REF_NAME}.cdx.json"
       - name: Release notes from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -85,5 +87,5 @@ jobs:
         run: |
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" --title "sublet-cli $GITHUB_REF_NAME" \
-            --notes-file release-notes.md $prerelease "sublet-cli-${GITHUB_REF_NAME}.cdx.json"
+          gh release create "$GITHUB_REF_NAME" --title "sublera-cli $GITHUB_REF_NAME" \
+            --notes-file release-notes.md $prerelease "sublera-cli-${GITHUB_REF_NAME}.cdx.json"

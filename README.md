@@ -1,15 +1,28 @@
-# Sublet
+# Sublera
 
-This repository contains the standalone GPU host agent for the Sublet
+This repository contains the standalone GPU host agent for the Sublera
 peer-to-peer compute market.
 
-- [`agent-cli/`](agent-cli/) — `sublet-cli`, the terminal worker described in
+- [`agent-cli/`](agent-cli/) — `sublera-cli`, the terminal worker described in
   [`CLI_PLAN.md`](CLI_PLAN.md).
 - `CLI_PLAN.md` — the dedicated architecture and build plan for the CLI.
 
 The central website/server and ledger live in a separate repository that is
-not public yet. The CLI is intentionally a separate npm package so hosts can update
-it with `npx sublet-cli` without redeploying the marketplace.
+not public yet. The CLI is intentionally a separate package so hosts can update it without
+redeploying the marketplace. Its local package name is `sublera-cli`; npm
+availability is unverified. This rebrand does not claim a new package publication,
+repository, or domain.
+
+## Migration from Sublet
+
+Use `sublera` / `sublera-cli` and `SUBLERA_*` in new commands and configuration.
+The old `sublet` / `sublet-cli` aliases and `SUBLET_*` environment variables remain
+supported; when both environment names are set, `SUBLERA_*` wins.
+The default `~/.sublet` directory is intentionally unchanged so both names share
+credentials, cache, and the instance lock. Model `.sublet.json` metadata is also
+unchanged. The repository remains `somemusic69-sudo/Sublet-cli` and the actual
+server remains `https://sublet.duckdns.org`.
+See the [CLI migration guide](agent-cli/README.md#migration-from-sublet) for details.
 
 ## License
 

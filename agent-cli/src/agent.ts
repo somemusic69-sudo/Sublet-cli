@@ -21,6 +21,9 @@ import { formatPercent, formatUsdNanos, modelShortName } from './util/format.js'
 import { clearAgentState, readAgentState, saveAgentState, type PersistedBooking, type PersistedState } from './state.js';
 import { VERSION } from './version.js';
 import { openUrl } from './util/open.js';
+import { acquireInstanceLock } from './util/instanceLock.js';
+import { atomicWrite } from './util/fs.js';
+import { healthPath, type AgentHealth } from './health.js';
 
 export type AgentOptions = {
   config: AgentConfig;
@@ -35,11 +38,12 @@ export type AgentOptions = {
   context?: number;
   slots?: number;
   gpuOverride?: GpuOverride | null;
-  /** `sublet start <code>`: serve this request from the website. */
+  /** `sublera start <code>`: serve this request from the website. */
   requestId?: string | null;
   tokPerSec?: number | null;
   autoInstall?: boolean;
   requireChecksum?: boolean;
+  drainTimeoutMs?: number;
   json?: boolean;
   once?: boolean;
   dashboard?: boolean;
@@ -136,6 +140,12 @@ export class Agent extends EventEmitter {
   /** The engine's answer to the self-check prompt right after the current model was loaded. */
   private engineBaseline: { modelPath: string; fingerprint: EngineFingerprint } | null = null;
   private selfCheckAbort: AbortController | null = null;
+  private draining = false;
+  private runStarted = false;
+  private stopPromise: Promise<void> | null = null;
+  private readonly messageTasks = new Set<Promise<void>>();
+  private healthTimer: NodeJS.Timeout | null = null;
+  private healthWrite: Promise<void> = Promise.resolve();
 
   constructor(options: AgentOptions) {
     super();
@@ -154,8 +164,44 @@ export class Agent extends EventEmitter {
 
   get dashboardState(): DashboardState { return this.dashboard.current; }
 
+  get health(): AgentHealth {
+    const connected = this.online && this.tunnel?.connected === true;
+    const engine = this.options.simulation ? 'simulation' : this.runner?.status || 'not-loaded';
+    return {
+      schemaVersion: 1, agentVersion: VERSION, pid: process.pid, updatedAt: Date.now(),
+      live: !this.stopped, ready: Boolean(connected && !this.stopped && !this.draining && !this.loadingModel
+        && (this.options.simulation || this.runner?.status === 'ready')),
+      draining: this.draining, simulation: this.options.simulation,
+      tunnel: this.tunnel?.state || 'closed', engine, activeJobs: this.activeJobs.size, loading: this.loadingModel,
+    };
+  }
+
+  private publishHealth(): Promise<void> {
+    const snapshot = JSON.stringify(this.health);
+    this.healthWrite = this.healthWrite.then(() => atomicWrite(healthPath(), `${snapshot}\n`)).catch(() => {
+      this.logger.warn('Could not write local health snapshot; check disk space and permissions');
+    });
+    return this.healthWrite;
+  }
+
+  /** Reject new work, finish in-flight inference up to a bounded grace period,
+   * then cancel leftovers and preserve booking state for server reconciliation. */
+  async drain(timeoutMs = this.options.drainTimeoutMs ?? 30_000): Promise<void> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 300_000) throw new Error('Drain timeout must be between 0 and 300000 ms');
+    if (this.stopped) return this.stopPromise ?? Promise.resolve();
+    this.draining = true;
+    this.selfCheckAbort?.abort();
+    this.loadAbort?.controller.abort(new Error('Agent draining'));
+    this.logger.info('Agent draining; new work will be refused', { timeoutMs, activeJobs: this.activeJobs.size });
+    await this.publishHealth();
+    const deadline = Date.now() + timeoutMs;
+    while (!this.stopped && this.activeJobs.size > 0 && Date.now() < deadline) await sleep(25);
+    await this.stop(true);
+  }
+
   waitForOnline(timeoutMs = 20_000): Promise<void> {
-    if (this.online) return Promise.resolve();
+    if (this.online && this.tunnel?.connected) return Promise.resolve();
+    if (this.stopped || this.draining) return Promise.reject(new Error('Agent is stopped or draining'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.onlineWaiters = this.onlineWaiters.filter((w) => w.timer !== timer);
@@ -166,6 +212,7 @@ export class Agent extends EventEmitter {
   }
 
   private markOnline(): void {
+    if (this.stopped || this.draining || !this.tunnel?.connected) return;
     this.online = true;
     for (const waiter of this.onlineWaiters) {
       clearTimeout(waiter.timer);
@@ -316,9 +363,40 @@ export class Agent extends EventEmitter {
 
 
   async run(): Promise<void> {
+    if (this.runStarted) throw new Error('Agent.run() can only be called once');
+    this.runStarted = true;
+    if (this.stopped) return;
+    const release = await acquireInstanceLock();
+    try {
+      await this.publishHealth();
+      this.healthTimer = setInterval(() => { void this.publishHealth(); }, 5_000);
+      await this.runOwned();
+    } finally {
+      if (this.healthTimer) clearInterval(this.healthTimer);
+      try {
+        const errors: unknown[] = [];
+        // A failed stop must not bypass pending handlers, late allocations, or
+        // final writes. Retain ownership until every cleanup step settles.
+        for (const cleanup of [
+          () => this.stop(true),
+          () => Promise.allSettled([...this.messageTasks]),
+          () => this.releaseResources(),
+          () => this.stateWrite,
+          () => this.publishHealth(),
+        ]) {
+          try { await cleanup(); } catch (error) { errors.push(error); }
+        }
+        // Preserve the first cleanup failure rather than masking it with a retry.
+        if (errors.length) throw errors[0];
+      } finally { await release(); }
+    }
+  }
+
+  private async runOwned(): Promise<void> {
+    if (this.stopped) return;
     const cfg = this.options.config;
-    if (!cfg.token) throw new Error('No host key saved. Run: sublet login');
-    this.logger.info(`Starting Sublet agent v${VERSION}`, { server: cfg.server, simulate: this.options.simulation });
+    if (!cfg.token) throw new Error('No host key saved. Run: sublera login');
+    this.logger.info(`Starting Sublera agent v${VERSION}`, { server: cfg.server, simulate: this.options.simulation });
     if (!this.options.simulation) {
       this.gpu = applyGpuOverride(await this.gpuMonitor.scan(true), this.options.gpuOverride);
       for (const warning of this.gpu.warnings) this.logger.warn(warning);
@@ -352,16 +430,26 @@ export class Agent extends EventEmitter {
       heartbeat: () => this.heartbeatPayload(),
     });
     this.tunnel.on('state', (state: string) => {
+      if (state !== 'open') this.online = false;
       if (state === 'open') {
         this.dashboard.update({ status: this.activeJobs.size ? 'working' : 'online' });
       } else if (state === 'reconnecting') {
         this.dashboard.update({ status: 'reconnecting', message: 'Tunnel dropped; keeping llama-server warm' });
       } else if (state === 'auth-failed') {
-        this.dashboard.update({ status: 'auth-failed', message: 'Host key rejected. Run sublet login again.' });
+        this.dashboard.update({ status: 'auth-failed', message: 'Host key rejected. Run sublera login again.' });
       }
     });
     this.tunnel.on('outdated', (error: Error) => { this.fail(error, 'outdated'); });
-    this.tunnel.on('message', (message: ServerMessage) => { void this.handleMessage(message); });
+    this.tunnel.on('message', (message: ServerMessage) => {
+      const task = this.handleMessage(message).catch((error) => {
+        if (this.stopped) return;
+        this.logger.error('Server message handling failed', { error: error instanceof Error ? error.message : String(error) });
+        this.fail(new Error('Server message handling failed'));
+        void this.stop(true);
+      });
+      this.messageTasks.add(task);
+      void task.finally(() => this.messageTasks.delete(task));
+    });
     this.tunnel.on('auth-failed', (error: Error) => { this.fail(error); });
     this.tunnel.start();
     try {
@@ -429,7 +517,7 @@ export class Agent extends EventEmitter {
 
   private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal; capContext?: boolean }): Promise<AgentModel> {
     if (this.options.simulation) {
-      const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublet-simulator.gguf';
+      const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublera-simulator.gguf';
       const paramB = paramBFromName(file) || 7;
       const quant = quantFromName(file) || 'Q4_K_M';
       return {
@@ -529,9 +617,9 @@ export class Agent extends EventEmitter {
       const source = result.install.source;
       if (source === 'env' || source === 'path') {
         this.logger.warn(
-          `Using your own llama-server (${source === 'env' ? 'set in LLAMA_SERVER' : 'found on your PATH'}), not the build Sublet installs. `
+          `Using your own llama-server (${source === 'env' ? 'set in LLAMA_SERVER' : 'found on your PATH'}), not the build Sublera installs. `
           + 'The server compares your answers with other hosts; a different llama.cpp build can fail those model checks. '
-          + `To use the official build, ${source === 'env' ? 'unset LLAMA_SERVER' : 'take llama-server off your PATH'} and run: sublet doctor --fix`,
+          + `To use the official build, ${source === 'env' ? 'unset LLAMA_SERVER' : 'take llama-server off your PATH'} and run: sublera doctor --fix`,
         );
       }
     }
@@ -661,7 +749,7 @@ export class Agent extends EventEmitter {
       vramMb: gpu?.totalVramMb || this.options.gpuOverride?.vramMb || 0,
       freeVramMb: gpu?.freeVramMb || 0,
       modelId: model?.modelId || (this.options.publicMode ? 'sublet-public' : 'sublet-standby'),
-      modelLabel: model?.label || (this.options.publicMode ? 'Sublet public host' : 'Standby'),
+      modelLabel: model?.label || (this.options.publicMode ? 'Sublera public host' : 'Standby'),
       repo: model?.repo || '',
       file: model?.file || '',
       quant: model?.quant || 'Q4_K_M',
@@ -708,6 +796,7 @@ export class Agent extends EventEmitter {
     if (this.stopped) return;
     switch (message.type) {
       case 'welcome':
+        if (!this.draining) this.markOnline();
         this.dashboard.update({ status: 'online' });
         this.emit('welcome');
         return;
@@ -715,6 +804,10 @@ export class Agent extends EventEmitter {
         await this.handleInfer(message as unknown as Record<string, unknown>);
         return;
       case 'load':
+        if (this.draining) {
+          this.tunnel?.send({ type: 'load_failed', requestId: message.requestId, message: 'Agent draining; retry on another host' });
+          return;
+        }
         await this.handleLoad(message as LoadJob);
         return;
       case 'cancel': {
@@ -741,7 +834,6 @@ export class Agent extends EventEmitter {
           return;
         }
         this.bookingWake = false;
-        this.loadingModel = false;
         this.clearPersistedBooking();
         void this.releaseWakeLockIfIdle();
         if (this.loadAbort?.requestId === requestId) {
@@ -813,8 +905,12 @@ export class Agent extends EventEmitter {
 
   private async handleInfer(message: Record<string, unknown>): Promise<void> {
     const jobId = String(message.jobId || '');
-    if (!jobId) return;
+    if (!jobId || this.stopped) return;
     if (this.activeJobs.has(jobId)) return;
+    if (this.draining || this.loadingModel || this.activeJobs.size >= this.runnerSlots()) {
+      this.tunnel?.send({ type: 'error', jobId, code: 'host_busy', message: 'Agent draining, loading, or at capacity; retry on another host' });
+      return;
+    }
     // A buyer never waits behind the agent's own self-check.
     this.selfCheckAbort?.abort();
     const controller = new AbortController();
@@ -830,26 +926,29 @@ export class Agent extends EventEmitter {
     };
     this.activeJobs.set(jobId, active);
     const wasIdle = this.activeJobs.size === 1;
-    if (wasIdle) {
-      await this.sleepGuard.acquire(this.options.publicMode ? 'public token serving' : 'dedicated booking');
-      this.dashboard.update({ wakeLock: true });
-    }
-    this.dashboard.update({
-      status: 'working',
-      job: this.dashboard.current.job?.kind === 'request'
-        ? this.dashboard.current.job
-        : { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 },
-      message: null,
-    });
-    const onChunk = (text: string, positions: TokenPosition[]) => {
-      if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
-      active.text += text;
-      active.chunks++;
-      const frame = positions.length ? { type: 'chunk', jobId, text, lp: positions } : { type: 'chunk', jobId, text };
-      // A chunk lost to a tunnel drop would leave a hole in the buyer's text, so stop the job instead.
-      if (!this.tunnel?.send(frame)) controller.abort(new Error('Tunnel dropped during the stream'));
-    };
     try {
+      if (wasIdle) {
+        await this.sleepGuard.acquire(this.options.publicMode ? 'public token serving' : 'dedicated booking');
+      }
+      controller.signal.throwIfAborted();
+      if (this.stopped) return;
+      this.dashboard.update({ wakeLock: this.sleepGuard.status().active });
+      this.dashboard.update({
+        status: 'working',
+        job: this.dashboard.current.job?.kind === 'request'
+          ? this.dashboard.current.job
+          : { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 },
+        message: null,
+      });
+      const onChunk = (text: string, positions: TokenPosition[]) => {
+        if (this.stopped || controller.signal.aborted) return;
+        if (active.firstTokenAt == null) active.firstTokenAt = Date.now();
+        active.text += text;
+        active.chunks++;
+        const frame = positions.length ? { type: 'chunk', jobId, text, lp: positions } : { type: 'chunk', jobId, text };
+        // A chunk lost to a tunnel drop would leave a hole in the buyer's text, so stop the job instead.
+        if (!this.tunnel?.send(frame)) controller.abort(new Error('Tunnel dropped during the stream'));
+      };
       let result;
       if (this.options.simulation) {
         result = await simulateChat({
@@ -857,7 +956,7 @@ export class Agent extends EventEmitter {
           messages: message.messages as ChatMessage[],
           maxTokens: Number(message.maxTokens || 256),
           temperature: Number(message.temperature ?? 0.7),
-          model: this.model?.modelId || 'sublet-simulator',
+          model: this.model?.modelId || 'sublera-simulator',
         }, {
           signal: controller.signal,
           tokPerSec: this.options.tokPerSec || 24,
@@ -876,6 +975,7 @@ export class Agent extends EventEmitter {
           onChunk,
         });
       }
+      controller.signal.throwIfAborted();
       const elapsed = Math.max(1, Date.now() - active.startedAt);
       this.lastTtft = this.options.simulation ? 300 : (active.firstTokenAt ? active.firstTokenAt - active.startedAt : null);
       this.lastSpeed = this.options.simulation
@@ -895,12 +995,13 @@ export class Agent extends EventEmitter {
       });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.tunnel?.send({ type: 'error', jobId, code: 'infer_failed', message: msg });
+      if (!this.stopped) this.tunnel?.send({ type: 'error', jobId, code: 'infer_failed', message: msg });
       this.logger.warn('Inference failed', { error: msg });
     } finally {
       this.activeJobs.delete(jobId);
       if (this.activeJobs.size === 0) {
         await this.releaseWakeLockIfIdle();
+        if (this.stopped) return;
         const current = this.dashboard.current.job;
         const fallback: DashboardJob | null = this.options.publicMode
           ? { kind: 'public', model: this.model?.file || null, verified: this.model?.verified, minTokS: null, guaranteedNanos: 0 }
@@ -924,25 +1025,30 @@ export class Agent extends EventEmitter {
   }
 
   private async handleLoad(load: LoadJob): Promise<void> {
+    if (this.stopped || this.draining || this.loadingModel || this.activeJobs.size > 0) {
+      this.tunnel?.send({ type: 'load_failed', requestId: load.requestId, message: 'Host is busy; retry after current work completes' });
+      return;
+    }
     this.bookingSlots = Math.max(1, Math.min(16, Math.round(Number(load.slots) || 1)));
     const requestId = String(load.requestId || '');
     this.loadingModel = true;
     this.bookingWake = true;
-    await this.sleepGuard.acquire('downloading and loading a booked model');
-    this.dashboard.update({
-      status: 'working',
-      wakeLock: this.sleepGuard.status().active,
-      job: { kind: 'request', id: requestId, model: load.file || load.url, verified: false, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
-      message: requestId.startsWith('bench_') ? 'Loading a model for the benchmark' : 'Pulling the requested GGUF',
-    });
+    const loadAbort = { requestId, controller: new AbortController() };
+    this.loadAbort = loadAbort;
     try {
+      await this.sleepGuard.acquire('downloading and loading a booked model');
+      loadAbort.controller.signal.throwIfAborted();
+      if (this.stopped || this.draining) throw new Error('Agent stopped or draining');
+      this.dashboard.update({
+        status: 'working',
+        wakeLock: this.sleepGuard.status().active,
+        job: { kind: 'request', id: requestId, model: load.file || load.url, verified: false, timerStartedAt: null, timerEndsAt: null, minTokS: null, guaranteedNanos: 0 },
+        message: requestId.startsWith('bench_') ? 'Loading a model for the benchmark' : 'Pulling the requested GGUF',
+      });
       this.tunnel?.send({ type: 'progress', requestId, note: 'Starting download' });
       const context = Math.max(Number(load.context || this.options.context || 8192), 2048);
       // The server may only point at a HuggingFace download, never at a file or address on this machine.
       const url = checkModelUrl(String(load.url || ''));
-      this.loadAbort?.controller.abort(new Error('Another request replaced this download'));
-      const loadAbort = { requestId, controller: new AbortController() };
-      this.loadAbort = loadAbort;
       const model = await this.loadModel(url, {
         context,
         requestId,
@@ -951,6 +1057,8 @@ export class Agent extends EventEmitter {
         expectedLayers: load.layers,
         file: load.file,
       });
+      loadAbort.controller.signal.throwIfAborted();
+      if (this.stopped || this.draining) throw new Error('Agent stopped or draining');
       this.model = model;
       this.loadingModel = false;
       this.tunnel?.send({
@@ -975,6 +1083,7 @@ export class Agent extends EventEmitter {
       this.loadingModel = false;
       this.bookingWake = false;
       await this.releaseWakeLockIfIdle();
+      if (this.stopped) return;
       this.clearPersistedBooking();
       this.tunnel?.send({ type: 'load_failed', requestId, message });
       this.logger.error('Request load failed', { error: message });
@@ -1157,7 +1266,7 @@ export class Agent extends EventEmitter {
   private async releaseWakeLockIfIdle(): Promise<void> {
     if (this.bookingWake || this.activeJobs.size > 0) return;
     await this.sleepGuard.stop();
-    this.dashboard.update({ wakeLock: false });
+    if (!this.stopped) this.dashboard.update({ wakeLock: false });
   }
 
   private updateGpuDashboard(): void {
@@ -1178,8 +1287,12 @@ export class Agent extends EventEmitter {
     this.emit('fatal', error);
   }
 
-  async stop(preserveState = false): Promise<void> {
-    if (this.stopped) return;
+  stop(preserveState = false): Promise<void> {
+    if (!this.stopPromise) this.stopPromise = this.stopOwned(preserveState);
+    return this.stopPromise;
+  }
+
+  private async stopOwned(preserveState: boolean): Promise<void> {
     this.stopped = true;
     this.online = false;
     for (const waiter of this.onlineWaiters) {
@@ -1199,11 +1312,11 @@ export class Agent extends EventEmitter {
     this.loadingModel = false;
     if (!preserveState) this.clearPersistedBooking();
     this.selfCheckAbort?.abort();
+    this.loadAbort?.controller.abort(new Error('Agent stopping'));
     for (const job of this.activeJobs.values()) job.controller.abort(new Error('Agent stopping'));
     this.activeJobs.clear();
     this.startup.abort(new Error('Agent stopping'));
-    await this.releaseResources();
-    this.emit('stop');
+    try { await this.releaseResources(); } finally { this.emit('stop'); }
   }
 
   /** Frees the wake lock, tunnel, llama-server and terminal. run() calls it again when startup finishes after stop(). */
@@ -1214,13 +1327,21 @@ export class Agent extends EventEmitter {
     this.gpuTimer = null;
     this.bookingTimer = null;
     this.endTimer = null;
-    this.cleanupKeyboard();
-    await this.sleepGuard.stop();
-    await this.tunnel?.stop();
-    await this.runner?.stop();
-    this.runner = null;
-    this.runnerModelPath = null;
-    this.runnerContext = null;
-    this.dashboard.stop();
+    const errors: unknown[] = [];
+    for (const cleanup of [
+      () => this.cleanupKeyboard(),
+      () => this.sleepGuard.stop(),
+      () => this.tunnel?.stop(),
+      () => this.runner?.stop(),
+      () => {
+        this.runner = null;
+        this.runnerModelPath = null;
+        this.runnerContext = null;
+        this.dashboard.stop();
+      },
+    ]) {
+      try { await cleanup(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw errors[0];
   }
 }

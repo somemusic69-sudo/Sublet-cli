@@ -1,6 +1,6 @@
-# Sublet CLI
+# Sublera CLI
 
-A standalone terminal agent for the Sublet peer-to-peer GPU market. It runs on the
+A standalone terminal agent for the Sublera peer-to-peer GPU market. It runs on the
 GPU owner's machine, manages `llama-server` and GGUF files, keeps the machine
 awake during overnight bookings, and holds one outbound WebSocket to the central
 server. Buyers never connect to the host directly.
@@ -13,7 +13,7 @@ host machines without redeploying the marketplace.
 Browser / buyer
       │  OpenAI-compatible stream
       ▼
-Sublet central server  ◄──── outbound WSS tunnel ────  sublet-cli (this package)
+Sublera central server  ◄──── outbound WSS tunnel ────  sublera-cli (this package)
       │                                                   │
       │                                                   ├── llama-server on 127.0.0.1
       │                                                   ├── GGUF cache + SHA-256
@@ -22,22 +22,47 @@ Sublet central server  ◄──── outbound WSS tunnel ────  sublet-
 Postgres/SQLite ledger, wallet, reliability, request board
 ```
 
+## Migration from Sublet
+
+- The local package name is `sublera-cli`, with `sublera` and `sublera-cli`
+  command names. The old `sublet` and `sublet-cli` command aliases remain supported.
+- Use `SUBLERA_*` environment variables in new examples. Legacy `SUBLET_*`
+  variables remain supported. If both names for a setting are set, `SUBLERA_*`
+  wins; command-line flags still take precedence over environment settings.
+- The default data directory is intentionally still `~/.sublet`, not a new
+  `~/.sublera`: old and new names share credentials, model/engine cache, recovery
+  state, and the instance lock. Do not move it merely for the rebrand. Existing
+  model `.sublet.json` metadata filenames are unchanged.
+- The actual repository remains `somemusic69-sudo/Sublet-cli` and the actual
+  server remains `https://sublet.duckdns.org`. No new domain, repository, or
+  package publication is claimed. npm availability of `sublera-cli` is unverified.
+- Any `npx sublera-cli` or version-pinned registry examples below are conditional
+  on a separately verified, trusted publication. They are not evidence that a
+  package exists on npm. Use a local build until availability is verified.
+
 ## Quick start
 
-You need Node.js 20.18.1 or newer (the LTS version from nodejs.org). On the GPU machine, run:
+You need Node.js 20.18.1 or newer (the LTS version from nodejs.org).
+From a local checkout on the GPU machine, run:
 
 ```bash
-npx sublet-cli start
+cd agent-cli
+npm install
+npm run build
+node dist/index.js start
 ```
 
-On the first run, `start` opens the Sublet website so you can connect this
+For subsequent examples, use `node dist/index.js` in place of `sublera` or
+`npx sublera-cli` when running from this local build.
+
+On the first run, `start` opens the Sublera website so you can connect this
 computer (click **Connect**), installs the matching `llama-server` build (CUDA
 for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback), and
 then waits for work. During the beta the default server is
-`https://sublet.duckdns.org`; `--server <url>` uses another Sublet server.
+`https://sublet.duckdns.org`; `--server <url>` uses another Sublera server.
 
-`sublet doctor` checks the machine (`--fix` installs the engine ahead of time).
-`sublet login` connects the computer again; on a machine without a browser,
+`sublera doctor` checks the machine (`--fix` installs the engine ahead of time).
+`sublera login` connects the computer again; on a machine without a browser,
 open the printed link on any phone or laptop, or use `login --key sh_...`.
 
 To serve one buyer request, pick it on the website's market. The board shows
@@ -46,18 +71,18 @@ which requests fit your GPU and which models are already on your disk. Click
 shows:
 
 ```bash
-npx sublet-cli start r_abc123
+npx sublera-cli start r_abc123
 ```
 
 The agent downloads and verifies the model, passes the model check, serves the
 booking, and exits when the booking ends. If you do not start within 15 minutes,
-the request goes back to the board. With `sublet start` already running, a Take
+the request goes back to the board. With `sublera start` already running, a Take
 on the website starts the download at once.
 
 For public pay-per-token hosting from the terminal:
 
 ```bash
-npx sublet-cli host \
+npx sublera-cli host \
   https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
   --price 0.25 --ctx 8192 --slots 4
 ```
@@ -65,7 +90,7 @@ npx sublet-cli host \
 For an SSH/mini-datacenter host that wants to see the buyer request board:
 
 ```bash
-npx sublet-cli jobs
+npx sublera-cli jobs
 ```
 
 `jobs` claims the selected request and, if no agent is already running, starts
@@ -76,19 +101,19 @@ ends or you press Ctrl+C.
 
 | Command | Purpose |
 | --- | --- |
-| `sublet login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
-| `sublet doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
-| `sublet start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request and exit when it ends. |
-| `sublet host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
-| `sublet jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
-| `sublet status` | Read-only host, reliability, wallet and active-booking summary. |
-| `sublet config [show\|path]` | The settings in use and where each one came from (flag, env, `agent.json`, login, default). Keys are masked. |
-| `sublet logout` | Remove the saved host key. |
+| `sublera login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
+| `sublera doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
+| `sublera start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request and exit when it ends. |
+| `sublera host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
+| `sublera jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
+| `sublera status` | Read-only host, reliability, wallet and active-booking summary. |
+| `sublera config [show\|path]` | The settings in use and where each one came from (flag, env, `agent.json`, login, default). Keys are masked. |
+| `sublera logout` | Remove the saved host key. |
 
 Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 `--vram`, `--ctx`, `--slots`, `--price`, `--price-in`, `--price-out`,
 `--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--log-level`,
-`--log-file`, `--no-color`, `--once`. Each can also be set with a `SUBLET_*`
+`--log-file`, `--no-color`, `--once`. Each can also be set with a `SUBLERA_*`
 environment variable or in `~/.sublet/agent.json` (see [Configuration](#configuration)).
 `--gpu` and `--vram` also correct a wrongly detected GPU name or VRAM size on a real host.
 
@@ -97,7 +122,7 @@ environment variable or in `~/.sublet/agent.json` (see [Configuration](#configur
 Everything can be exercised without a GPU or a multi-GB download:
 
 ```bash
-sublet start --simulation --gpu "NVIDIA GeForce RTX 4060" --vram 8188 --tok-s 24
+sublera start --simulation --gpu "NVIDIA GeForce RTX 4060" --vram 8188 --tok-s 24
 ```
 
 Simulation mode still uses the real tunnel, metering, billing, model checks, booking
@@ -130,7 +155,7 @@ agent-cli/
 │       ├── terminalDashboard.ts the overnight status box
 │       └── progress.ts          download bar with speed and ETA
 ├── tests/                       unit tests, no network or GPU required
-├── scripts/e2e.mjs              9-check end-to-end proof against a live Sublet server
+├── scripts/e2e.mjs              9-check end-to-end proof against a live Sublera server
 └── README.md
 ```
 
@@ -138,9 +163,9 @@ agent-cli/
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Sublet GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
+│  Sublera GPU TERMINAL AGENT v1.0.0                   STATUS: ● WORKING  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Host Endpoint : https://alex.sublet.example.com/api/v1                        │
+│  Host Endpoint : https://host.example.com/api/v1                        │
 │  Reliability   : 98.5%  (OK - held only after repeated failures)     │
 │  GPU Detected  : NVIDIA GeForce RTX 3090 (21.2 GB free / 24.0 GB)    │
 │  GPU Temp/Power: 61°C · 185W · Wake-Lock: ACTIVE - sleep blocked     │
@@ -152,7 +177,7 @@ agent-cli/
 ├──────────────────────────────────────────────────────────────────────┤
 │  Session Earn. : $4.68 / $6.00 Guaranteed                            │
 │  Total Wallet  : $42.15                                              │
-│  Server        : https://sublet.example.com                                    │
+│  Server        : https://sublera.example.com                                    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -162,10 +187,10 @@ systemd/journald.
 
 ## Data directory
 
-Everything lives under `~/.sublet` (override with `SUBLET_HOME`):
+Everything lives under `~/.sublet` (override with `SUBLERA_HOME`):
 
 ```text
-~/.sublet/config.json        host key + server, written by sublet login (0600)
+~/.sublet/config.json        host key + server, written by sublera login (0600)
 ~/.sublet/agent.json         optional settings file you write (see Configuration)
 ~/.sublet/state.json         active booking recovery snapshot (0600)
 ~/.sublet/bin/               llama-server builds + manifest.json
@@ -184,11 +209,84 @@ and the download restarts from zero rather than corrupting weights.
 
 ## Configuration
 
+### Production operations
+
+`start`, `host`, and a serving `jobs` agent exclusively own `SUBLERA_HOME` via
+`agent.lock`. A second process refuses to start. Storage maintenance acquires
+the same lock, as does engine installation by `doctor --fix`. After an abrupt crash the lock is deliberately not reclaimed
+automatically: stop/check every agent using that directory, then remove only
+`agent.lock`. Never remove `state.json` just to unlock the directory.
+
+- `sublera health live --json`: local process liveness.
+- `sublera health ready --json`: local readiness (default health mode). Requires
+  a fresh snapshot, connected tunnel, loaded ready engine (or simulation), and
+  no drain/model load. Exit 0 means the requested check passed; exit 1 means
+  failed/unknown. Snapshots update every 5 seconds and expire after 15 seconds.
+  Simulation is explicitly labeled; these checks are not model attestation,
+  server-side billing approval, or proof of GPU performance/capacity.
+- SIGTERM enters drain: refuse new inference/model loads, allow active inference
+  up to 30 seconds, then cancel leftovers, stop the engine, and preserve booking
+  state. Configure `--drain-timeout <ms>` / `SUBLERA_DRAIN_TIMEOUT_MS` /
+  `agent.json` `drainTimeoutMs` (0–300000). Ctrl+C remains immediate stop.
+  Drain is local admission control; it does not implement a server scheduling
+  handshake. Use server-side maintenance controls for long booked windows.
+- `sublera storage status --json`: reports model, engine, cache and log sizes.
+- `sublera storage prune --json`: **preview only**, for regular model `.part`
+  and `.part.json` files older than seven days. Add `--force` to apply. Stop
+  serving first. Complete models, engine versions, keys and booking state are
+  never pruned by this command; recent partial downloads remain resumable.
+
+Use fixed CLI/engine versions, a dedicated non-admin service account and a
+dedicated local `SUBLERA_HOME` (not a shared network filesystem). Configure your
+service supervisor with bounded restart/backoff, log rotation and enough stop
+grace for drain plus engine teardown. Health snapshots include no prompts/keys,
+but are local diagnostics, not tamper-proof attestation. Service installation,
+fleet metrics/alerts, server billing/idempotency validation, real GPU soak and
+rollback acceptance remain operator/release gates; see `SOAK_TEST.md`.
+
+Engine replacement validates the staged binary's presence and hash before
+promotion and attempts rollback on ordinary errors. Promotion and manifest
+updates are not one crash-atomic transaction: abrupt termination can leave
+uniquely named `.tmp`/`.bak` directories requiring operator inspection. Disk
+headroom checks cannot reserve space against other applications. During shutdown,
+ownership remains held until pending message handlers settle; a stuck handler
+may therefore require supervisor intervention rather than unsafe lock takeover.
+
+### Storage safety
+
+The CLI does not create screenshot browser profiles. Its application data lives
+under `~/.sublet`, or `SUBLERA_HOME` on a drive you choose.
+
+- Model downloads share a **20 GiB cache budget**, including completed models,
+  resumable `.part` files, sidecars and nested files. A full cache refuses new
+  downloads; it never automatically deletes a model or booking recovery data.
+- Downloads retain **5 GiB free disk headroom**. Unknown-length model streams
+  are bounded too; free space is checked periodically during large transfers.
+- Set `SUBLERA_MODEL_CACHE_GB=40` for a larger model cache, and
+  `SUBLERA_MIN_FREE_DISK_GB=10` for more headroom. Values are positive GiB and
+  these are environment-only controls, not `agent.json` keys.
+- New engine installs refuse a `bin` directory above **10 GiB** and archive
+  downloads above **2 GiB each**. Extraction is bounded; the installer requires
+  additional temporary disk space and removes its work/staging on normal exit.
+- Default agent logs rotate at **10 MiB**, with **5 previous files** (about
+  **60 MiB** total). External stdout/service-manager logs need their own rotation.
+
+Existing oversized caches are not erased or shrunk automatically. Stop the
+agent before manually removing unused cached models/partials or old engine
+versions. Interrupted downloads remain resumable and count toward the budget;
+forced termination can leave installer work directories. Limits apply to new
+writes, not an absolute filesystem quota: other processes, simultaneous CLI
+instances, npm caches and external engine writes can still consume disk space.
+
 The settings listed below work three ways. The first one found wins:
 
 1. a command-line flag (`--ctx 16384`)
-2. an environment variable (`SUBLET_CTX=16384`)
-3. `~/.sublet/agent.json` (path override: `SUBLET_CONFIG`)
+2. a `SUBLERA_*` environment variable (`SUBLERA_CTX=16384`)
+3. the corresponding legacy `SUBLET_*` environment variable (`SUBLET_CTX=16384`)
+4. `~/.sublet/agent.json` (path override: `SUBLERA_CONFIG`, legacy `SUBLET_CONFIG`)
+
+When both environment names are set, `SUBLERA_*` wins. This also applies to
+`SUBLERA_HOME` / `SUBLET_HOME`; without an override the home remains `~/.sublet`.
 
 ```json
 {
@@ -203,28 +301,28 @@ The settings listed below work three ways. The first one found wins:
 
 | `agent.json` key | Environment variable | Flag |
 | --- | --- | --- |
-| `server` | `SUBLET_SERVER` | `--server` |
-| `token` | `SUBLET_KEY` | `--key` |
-| `wsPath` | `SUBLET_WS_PATH` | `--ws-path` |
-| `context` | `SUBLET_CTX` | `--ctx` |
-| `slots` | `SUBLET_SLOTS` | `--slots` |
-| `price` / `priceIn` / `priceOut` | `SUBLET_PRICE` / `SUBLET_PRICE_IN` / `SUBLET_PRICE_OUT` | `--price` / `--price-in` / `--price-out` |
-| `gpu` / `vram` | `SUBLET_GPU` / `SUBLET_VRAM` | `--gpu` / `--vram` |
-| `tokPerSec` | `SUBLET_TOK_S` | `--tok-s` |
-| `noInstall` | `SUBLET_NO_INSTALL` | `--no-install` |
-| `noBrowser` | `SUBLET_NO_BROWSER` | `--no-browser` |
-| `requireChecksum` | `SUBLET_REQUIRE_CHECKSUM` | `--require-checksum` |
-| `logLevel` | `SUBLET_LOG_LEVEL` | `--log-level` |
-| `logFile` | `SUBLET_LOG_FILE` | `--log-file` |
+| `server` | `SUBLERA_SERVER` | `--server` |
+| `token` | `SUBLERA_KEY` | `--key` |
+| `wsPath` | `SUBLERA_WS_PATH` | `--ws-path` |
+| `context` | `SUBLERA_CTX` | `--ctx` |
+| `slots` | `SUBLERA_SLOTS` | `--slots` |
+| `price` / `priceIn` / `priceOut` | `SUBLERA_PRICE` / `SUBLERA_PRICE_IN` / `SUBLERA_PRICE_OUT` | `--price` / `--price-in` / `--price-out` |
+| `gpu` / `vram` | `SUBLERA_GPU` / `SUBLERA_VRAM` | `--gpu` / `--vram` |
+| `tokPerSec` | `SUBLERA_TOK_S` | `--tok-s` |
+| `noInstall` | `SUBLERA_NO_INSTALL` | `--no-install` |
+| `noBrowser` | `SUBLERA_NO_BROWSER` | `--no-browser` |
+| `requireChecksum` | `SUBLERA_REQUIRE_CHECKSUM` | `--require-checksum` |
+| `logLevel` | `SUBLERA_LOG_LEVEL` | `--log-level` |
+| `logFile` | `SUBLERA_LOG_FILE` | `--log-file` |
 
 An unknown key or a bad value in `agent.json` stops the agent with exit code 2
-and names the problem; a typo is never ignored silently. `sublet config` prints
+and names the problem; a typo is never ignored silently. `sublera config` prints
 the value in use for every setting and where it came from (keys masked);
-`sublet config --json` gives the same for tooling.
+`sublera config --json` gives the same for tooling.
 
 ## Corporate networks
 
-The agent only connects outward: the Sublet server (HTTPS + one WebSocket),
+The agent only connects outward: the Sublera server (HTTPS + one WebSocket),
 HuggingFace for models, GitHub for llama.cpp releases, and npm for the version
 check. Nothing listens on the network; `llama-server` binds to `127.0.0.1`.
 
@@ -232,7 +330,7 @@ check. Nothing listens on the network; `llama-server` binds to `127.0.0.1`.
 export HTTPS_PROXY=http://user:password@proxy.corp.example:3128
 export NO_PROXY=.corp.example,10.0.0.5
 export NODE_EXTRA_CA_CERTS=/etc/ssl/corp-root.pem   # TLS-inspecting proxies
-sublet doctor        # "Network: via proxy http://***@proxy.corp.example:3128"
+sublera doctor        # "Network: via proxy http://***@proxy.corp.example:3128"
 ```
 
 - `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` are read in upper or lower case.
@@ -270,17 +368,17 @@ A service manager should restart the agent and send SIGTERM to stop it. A
 systemd example (Linux):
 
 ```ini
-# /etc/systemd/system/sublet.service
+# /etc/systemd/system/sublera.service
 [Unit]
-Description=Sublet GPU host agent
+Description=Sublera GPU host agent
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=sublet
-Environment=SUBLET_NO_BROWSER=true
-# Run "sublet login --key sh_..." once as this user, or provide SUBLET_KEY from a secret store.
-ExecStart=/usr/bin/env npx --yes sublet-cli@1 start --no-color
+User=sublera
+Environment=SUBLERA_NO_BROWSER=true
+# Run "sublera login --key sh_..." once as this user, or provide SUBLERA_KEY from a secret store.
+ExecStart=/usr/bin/env npx --yes sublera-cli@1 start --no-color
 Restart=always
 RestartSec=10
 # Exit code 2 is a configuration mistake: do not restart in a loop.
@@ -292,10 +390,10 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 ```
 
-Pin a major version (`sublet-cli@1`) so an unattended machine never jumps to
+Pin a major version (`sublera-cli@1`) so an unattended machine never jumps to
 a release with breaking changes. On Windows, Task Scheduler ("At startup",
 "Restart on failure") or a service wrapper such as NSSM running
-`npx --yes sublet-cli@1 start` does the same.
+`npx --yes sublera-cli@1 start` does the same.
 
 ## Verification and safety
 
@@ -362,7 +460,7 @@ a release with breaking changes. On Windows, Task Scheduler ("At startup",
 
 ## Server contract
 
-This CLI works with the Sublet server (separate, not public yet) and with any
+This CLI works with the Sublera server (separate, not public yet) and with any
 server that implements the same small contract:
 
 | Endpoint / frame | Purpose |
@@ -373,11 +471,11 @@ server that implements the same small contract:
 | `GET /api/agent/requests` | open buyer requests + VRAM fit + `cached` (the model is already on this host's disk) |
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
-| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublet start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
-| HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublet-cli@latest` |
+| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublera start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
+| HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublera-cli@latest` |
 | `welcome`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent. Model checks arrive as normal `infer` jobs. |
 
-The agent sends its version as `user-agent: sublet-cli/<version>` on every
+The agent sends its version as `user-agent: sublera-cli/<version>` on every
 request and as `agentVersion` in `hello`, so the server can refuse old agents
 before a protocol change. A handshake refused with HTTP `401`/`403` is treated
 like a rejected host key.
@@ -396,8 +494,8 @@ npm test
 npm run build
 node dist/index.js --help
 
-# end-to-end against a running Sublet server
-$env:SUBLET_HOME="$env:TEMP\sublet-cli-e2e"
+# end-to-end against a running Sublera server
+$env:SUBLERA_HOME="$env:TEMP\sublera-cli-e2e"
 npm run e2e
 ```
 
@@ -408,33 +506,35 @@ drops the tunnel, reconnects inside the grace window, verifies the same timer
 survives, and cancels the request. It uses simulation mode so it does not need
 a real 4GB+ model.
 
-## Publishing
+## Packaging and publication status
+
+The local package name is `sublera-cli`. Its primary binaries are `sublera` and
+`sublera-cli`; `sublet` and `sublet-cli` remain compatibility aliases.
+For local package inspection only:
 
 ```bash
 npm pack --dry-run
-npm publish --access public
 ```
 
-The package exposes both `sublet` and `sublet-cli` binaries. Users can then run:
-
-```bash
-npx sublet-cli doctor --fix
-npx sublet-cli start
-```
+npm availability is unverified. This documentation rebrand does not publish a
+package or claim a registry migration. Do not treat registry-based examples as
+installation instructions until the package and publisher are independently
+verified. Release workflow artifact names use `sublera-cli`; changing those names
+does not itself publish anything.
 
 ## Verification status
 
 This build was verified on a Windows machine with an RTX 4060:
 
 - `npm run typecheck`, `npm test`, and `npm run build` pass.
-- `npm run e2e` passes against a live Sublet server: tunnel, billed public
+- `npm run e2e` passes against a live Sublera server: tunnel, billed public
   stream, model check, booking timer, unlimited booked stream, jobs board,
   process-kill crash recovery with the same timer, standalone `jobs` serving,
   escrow cleanup, device login, and take + `start <code>`.
-- On Linux x64 (CPU), `sublet doctor --fix` installed the official llama.cpp
+- On Linux x64 (CPU), `sublera doctor --fix` installed the official llama.cpp
   b12202 build, including its library link chains, and served SmolLM2 GGUFs.
   Those runs measured the model-check thresholds.
-- `sublet doctor --fix` downloaded the official CUDA `llama-server` build
+- `sublera doctor --fix` downloaded the official CUDA `llama-server` build
   (b12176), verified its published SHA-256, extracted it, and recorded the
   binary hash in `~/.sublet/bin/manifest.json`.
 - A real 637MB TinyLlama 1.1B Q4_K_M GGUF was downloaded, header-checked,

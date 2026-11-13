@@ -17,6 +17,7 @@ import {
 } from './gguf.js';
 import { modelsDir } from '../config.js';
 import { USER_AGENT } from '../version.js';
+import { directoryBytes, diskWriteAllowance, storageLimitError, storagePolicy } from '../util/storage.js';
 import type { CachedModelInfo } from '../types.js';
 
 export type ModelProgress = {
@@ -260,7 +261,16 @@ async function verifyHeader(path: string, expectedLayers: number | null | undefi
   return info;
 }
 
+let pendingDownload: Promise<unknown> = Promise.resolve();
+
+/** Serialize downloads so concurrent jobs in this process cannot spend the same disk budget. */
 export async function downloadModel(options: DownloadModelOptions): Promise<LoadedModel> {
+  const operation = pendingDownload.catch(() => undefined).then(() => downloadModelWithinBudget(options));
+  pendingDownload = operation;
+  return operation;
+}
+
+async function downloadModelWithinBudget(options: DownloadModelOptions): Promise<LoadedModel> {
   const expectedSha = expectedHash(options.expectedSha256);
   const url = checkModelUrl(options.url, { allowLocalhost: options.allowLocalhost });
   const cacheDir = options.cacheDir ?? modelsDir();
@@ -269,6 +279,8 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   const part = `${dest}.part`;
   const context = options.context ?? 8192;
   const slots = options.slots ?? 1;
+  const policy = storagePolicy();
+  options.signal?.throwIfAborted();
   const fetchModel = (headers: Record<string, string>) => fetchModelUrl(url, { headers, signal: options.signal }, {
     allowLocalhost: options.allowLocalhost,
     fetchImpl: options.fetchImpl,
@@ -320,6 +332,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     startAt = 0;
   }
   let total = options.expectedSize ?? null;
+  if (total != null && (!Number.isSafeInteger(total) || total <= 0)) throw new Error('Expected model size must be a positive safe integer');
   let response: Response;
   const headers: Record<string, string> = { 'user-agent': USER_AGENT, accept: 'application/octet-stream' };
   if (startAt > 0) headers.range = `bytes=${startAt}-`;
@@ -356,6 +369,19 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   }
   const contentLength = Number(response.headers.get('content-length') || 0);
   if (!total && contentLength > 0) total = startAt + contentLength;
+  if (total != null && (!Number.isSafeInteger(total) || total <= 0)) {
+    await response.body.cancel().catch(() => undefined);
+    throw new Error('Invalid model download size');
+  }
+  // Once the response establishes a restart, discard the old partial before
+  // measuring cache usage and free space. Otherwise it is counted alongside its
+  // replacement and can falsely exhaust either budget. Resumes keep their bytes.
+  if (!append) {
+    try { await removeIfExists(part); } catch (error) {
+      await response.body.cancel().catch(() => undefined);
+      throw error;
+    }
+  }
   const limit = Math.min(total ?? MAX_MODEL_BYTES, MAX_MODEL_BYTES);
   const free = await freeDiskBytes(cacheDir);
   const refusal = total && total > MAX_MODEL_BYTES
@@ -368,6 +394,17 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
     throw new Error(refusal);
   }
 
+  let writeBudget: number;
+  try {
+    const used = await directoryBytes(cacheDir);
+    // Keep 64 KiB for sidecar metadata; old/replaced models count until replacement succeeds.
+    writeBudget = Math.min(policy.modelCacheBytes - used - 64 * 1024, await diskWriteAllowance(cacheDir, policy.reserveBytes));
+    if (writeBudget <= 0 || (total != null && total - startAt > writeBudget)) throw storageLimitError();
+  } catch (error) {
+    await response.body.cancel().catch(() => undefined);
+    throw error;
+  }
+
   const hash = createHash('sha256');
   if (append) {
     await new Promise<void>((resolve, reject) => {
@@ -376,8 +413,6 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       rs.on('end', () => resolve());
       rs.on('error', reject);
     });
-  } else {
-    await removeIfExists(part);
   }
 
   const bar = options.showProgress === false ? null : new ProgressBar({
@@ -391,6 +426,7 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
   const writer = createWriteStream(part, { flags: append ? 'a' : 'w' });
   let received = startAt;
   let oversized = false;
+  let lastDiskCheck = startAt;
   const started = Date.now();
   const reader = response.body.getReader();
   try {
@@ -399,6 +435,11 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
       if (done) break;
       if (options.signal?.aborted) throw new Error('Download cancelled');
       if (!value?.length) continue;
+      if (received - startAt + value.length > writeBudget) throw storageLimitError();
+      if (received - lastDiskCheck >= 64 * 1024 * 1024) {
+        if (await diskWriteAllowance(cacheDir, policy.reserveBytes) < value.length) throw storageLimitError();
+        lastDiskCheck = received;
+      }
       if (received + value.length > limit) {
         oversized = true;
         throw new Error(`The download is larger than the expected ${formatBytes(limit)}; the file was rejected`);

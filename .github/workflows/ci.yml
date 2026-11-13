@@ -62,7 +62,8 @@ jobs:
         working-directory: agent-cli
         run: |
           npm pack --silent
-          npm install --prefix /tmp/sublet-pkg "file:$(ls sublet-cli-*.tgz)"
-          node /tmp/sublet-pkg/node_modules/sublet-cli/dist/index.js --version
-          node /tmp/sublet-pkg/node_modules/sublet-cli/dist/index.js config --json > /dev/null
-          ! ls /tmp/sublet-pkg/node_modules/sublet-cli/dist/*.map 2>/dev/null
+          npm install --prefix /tmp/sublera-pkg "file:$(ls sublera-cli-*.tgz)"
+          /tmp/sublera-pkg/node_modules/.bin/sublera --version
+          /tmp/sublera-pkg/node_modules/.bin/sublet --version
+          node /tmp/sublera-pkg/node_modules/sublera-cli/dist/index.js config --json > /dev/null
+          ! ls /tmp/sublera-pkg/node_modules/sublera-cli/dist/*.map 2>/dev/null

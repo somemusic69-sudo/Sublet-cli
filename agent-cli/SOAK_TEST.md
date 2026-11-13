@@ -9,7 +9,7 @@ model reference digest, settings and server build. Never record credentials.
 ## Entry gates
 
 - Run `npm ci` and `npm run check` in the CLI directory on the target host.
-- Run `sublet doctor --fix --require-checksum` with the intended proxy/CA path.
+- Run `sublera doctor --fix --require-checksum` with the intended proxy/CA path.
 - Authenticate in advance. Use `--non-interactive` under the intended service
   account; verify missing credentials fail rather than starting a login flow.
 - Load the real GGUF and confirm its independently obtained reference digest.

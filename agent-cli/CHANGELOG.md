@@ -8,6 +8,40 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
 
+### Fixed
+- Update the CI packed-package smoke test to install `sublera-cli` and exercise
+  both the new `sublera` executable and the legacy `sublet` alias.
+- Refuse linked model roots before pruning; concurrent instance-lock release
+  shares one operation and cannot unlink a later owner's lock.
+- Correct download budgets when an obsolete partial must be restarted.
+- Serialize engine installation per home, protect `doctor --fix` with instance
+  ownership, use unique staging directories and atomic manifest writes, and
+  attempt rollback when replacement installation fails.
+- Keep instance ownership until pending message handlers settle; clean up jobs
+  after wake-lock acquisition failures and suppress work/output after stop or
+  cancellation. Reject contradictory or malformed readiness snapshots.
+- Attempt all shutdown cleanup steps even if one fails, retaining ownership
+  through pending handlers and final state/health writes before reporting errors.
+
+### Added
+- Sublera branding, local package name `sublera-cli`, and `sublera` executable
+  aliases. Legacy executables and `SUBLET_*` environment names remain supported;
+  `SUBLERA_*` names take precedence. The default `.sublet` data directory,
+  server endpoint and repository identity are unchanged. No publication implied.
+- Exclusive `SUBLET_HOME` ownership for serving agents and storage maintenance;
+  stale locks fail closed with explicit operator recovery instructions.
+- Local `health [live|ready]` snapshots, bounded SIGTERM inference drain, and
+  `storage status|prune` with dry-run-by-default pruning of old partial files.
+- Operational regression tests for cross-process ownership, cancellation,
+  reconnect readiness and safe maintenance. Async server message errors are
+  caught; busy hosts refuse conflicting model loads/new inference.
+- Storage guards: model-cache downloads default to a 20 GiB budget and preserve
+  5 GiB disk headroom, configurable through `SUBLET_MODEL_CACHE_GB` and
+  `SUBLET_MIN_FREE_DISK_GB`. Partial files count; existing data is not evicted.
+- Engine archive/cache limits, bounded tar extraction/link materialization,
+  and staging-space preflight checks. Model downloads serialize within one
+  process to avoid spending the same budget concurrently.
+
 ## [1.3.0] - 2026-11-12
 
 ### Added

@@ -1,16 +1,22 @@
 import { createWriteStream } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { brandEnv } from '../util/env.js';
 import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, normalize, sep } from 'node:path';
+import { basename, dirname, join, normalize, relative, sep } from 'node:path';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 import { binDir, cacheDir } from '../config.js';
 import { USER_AGENT } from '../version.js';
-import { pathExists, safeJoin, sha256File } from '../util/fs.js';
+import { atomicWrite, pathExists, safeJoin, sha256File } from '../util/fs.js';
 import { fetchJson, type HttpError } from '../util/http.js';
 import { which } from '../util/exec.js';
 import { ProgressBar } from '../ui/progress.js';
 import type { Logger } from '../logger.js';
 import type { GpuSnapshot, GpuVendor } from '../hardware/types.js';
+import { directoryBytes, diskWriteAllowance, requireDiskSpace, storagePolicy } from '../util/storage.js';
+
+const MAX_ARCHIVE_BYTES = 2 * 1024 ** 3;
+const MAX_ENGINE_CACHE_BYTES = 10 * 1024 ** 3;
 
 export type LlamaVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
@@ -167,7 +173,7 @@ async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, 
 
 async function checksumFor(asset: ReleaseAsset, release: ReleaseInfo, options: InstallOptions, isMain: boolean): Promise<{ expected: string | null; published: boolean }> {
   const env = options.env ?? process.env;
-  const override = env.SUBLET_LLAMA_SHA256;
+  const override = brandEnv(env, 'SUBLET_LLAMA_SHA256');
   if (isMain && override && /^[a-f0-9]{64}$/i.test(override.trim())) return { expected: override.trim().toLowerCase(), published: true };
   if (asset.digest && /^sha256:[a-f0-9]{64}$/i.test(asset.digest)) return { expected: asset.digest.slice(7).toLowerCase(), published: true };
   const sidecar = release.assets.find((a) => new RegExp(`^${escapeRegExp(asset.name)}\\.sha256(?:\\.txt)?$`, 'i').test(a.name));
@@ -204,6 +210,12 @@ async function downloadFile(url: string, dest: string, options: InstallOptions &
       const response = await fetchImpl(url, { redirect: 'follow', headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30 * 60_000) });
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length') || 0) || null;
+      const reserve = storagePolicy(options.env).reserveBytes;
+      const budget = Math.min(MAX_ARCHIVE_BYTES, await diskWriteAllowance(dirname(dest), reserve));
+      if (budget <= 0 || (total != null && (!Number.isSafeInteger(total) || total < 0 || total > budget))) {
+        await response.body.cancel().catch(() => undefined);
+        throw new Error('Engine archive exceeds storage budget (maximum 2 GiB), or insufficient free disk space');
+      }
       if (total) bar?.setTotal(total);
       const writer = createWriteStream(dest, { flags: 'w' });
       let received = 0;
@@ -213,6 +225,13 @@ async function downloadFile(url: string, dest: string, options: InstallOptions &
           const { done, value } = await reader.read();
           if (done) break;
           if (value?.length) {
+            // Free space can shrink while streaming (other downloads/processes).
+            // Compare remaining allowance with this chunk plus writes still buffered,
+            // not all bytes received: flushed bytes already reduced free disk space.
+            const allowance = await diskWriteAllowance(dirname(dest), reserve);
+            if (received + value.length > budget || value.length + writer.writableLength > allowance) {
+              throw new Error('Engine archive exceeds storage budget');
+            }
             if (!writer.write(Buffer.from(value))) {
               await new Promise<void>((resolve, reject) => {
                 const onDrain = () => { cleanup(); resolve(); };
@@ -233,6 +252,9 @@ async function downloadFile(url: string, dest: string, options: InstallOptions &
       } catch (error) {
         writer.destroy();
         throw error;
+      } finally {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
       }
       bar?.done();
       return dest;
@@ -275,12 +297,17 @@ export async function extractArchive(archive: string, destination: string): Prom
     // Linux and macOS builds ship library link chains (libllama.so -> libllama.so.0 -> libllama.so.0.9.0).
     // tar refuses to create a link through another link, so links are skipped here and copied as files below.
     const links = new Map<string, { linkpath: string; hard: boolean }>();
+    let entries = 0;
+    let expanded = 0;
     await tar.x({
       file: archive,
       cwd: destination,
       strict: true,
       filter: (path, entry) => {
         safeJoin(destination, path);
+        entries++;
+        expanded += Number(entry.size || 0);
+        if (entries > 10_000 || !Number.isSafeInteger(expanded) || expanded > 4 * 1024 ** 3) throw new Error('Archive exceeds entry or 4 GiB expansion limit');
         const type = 'type' in entry ? entry.type : undefined;
         if (type === 'SymbolicLink' || type === 'Link') {
           links.set(path.replace(/\/+$/, ''), { linkpath: String((entry as { linkpath?: string }).linkpath ?? ''), hard: type === 'Link' });
@@ -297,6 +324,7 @@ export async function extractArchive(archive: string, destination: string): Prom
 
 /** Copies the file each archive link points to, following link chains, and never outside the destination. */
 async function materializeLinks(destination: string, links: Map<string, { linkpath: string; hard: boolean }>): Promise<void> {
+  let expanded = await directoryBytes(destination);
   const resolveLink = (path: string, depth = 0): string => {
     const link = links.get(path);
     if (!link) return path;
@@ -311,6 +339,8 @@ async function materializeLinks(destination: string, links: Map<string, { linkpa
     const source = safeJoin(destination, resolveLink(path));
     const info = await stat(source).catch(() => null);
     if (!info?.isFile()) continue;
+    expanded += info.size;
+    if (expanded > 4 * 1024 ** 3) throw new Error('Archive links exceed the 4 GiB expansion limit');
     const target = safeJoin(destination, path);
     await mkdir(dirname(target), { recursive: true });
     await copyFile(source, target);
@@ -347,7 +377,7 @@ async function readManifest(env: NodeJS.ProcessEnv): Promise<Manifest> {
 
 async function writeManifest(env: NodeJS.ProcessEnv, manifest: Manifest): Promise<void> {
   await mkdir(binDir(env), { recursive: true });
-  await writeFile(manifestPath(env), JSON.stringify(manifest, null, 2), 'utf8');
+  await atomicWrite(manifestPath(env), JSON.stringify(manifest, null, 2));
 }
 
 export async function findExistingLlama(options: InstallOptions = {}): Promise<LlamaInstall | null> {
@@ -375,10 +405,10 @@ export async function ensureLlamaServer(options: InstallOptions & { fix?: boolea
   if (existing) {
     if (!options.requireChecksum || existing.verified) return { found: true, install: existing };
     if (!options.fix || existing.source === 'env' || existing.source === 'path') {
-      return { found: false, reason: 'The existing llama-server has no verified release checksum; --require-checksum refuses it. Remove custom LLAMA_SERVER/PATH overrides and run sublet doctor --fix --require-checksum.' };
+      return { found: false, reason: 'The existing llama-server has no verified release checksum; --require-checksum refuses it. Remove custom LLAMA_SERVER/PATH overrides and run sublera doctor --fix --require-checksum.' };
     }
   }
-  if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: sublet doctor --fix' };
+  if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: sublera doctor --fix' };
   try {
     const install = await installLlamaServer(options);
     return { found: true, install };
@@ -387,12 +417,30 @@ export async function ensureLlamaServer(options: InstallOptions & { fix?: boolea
   }
 }
 
+const pendingInstalls = new Map<string, Promise<LlamaInstall>>();
+
+// The caller owns the cross-process instance lock (the running agent already holds it).
+// Queue the entire read/modify/write transaction, not just the manifest write.
 export async function installLlamaServer(options: InstallOptions = {}): Promise<LlamaInstall> {
+  const env = { ...(options.env ?? process.env) };
+  const home = binDir(env);
+  const key = process.platform === 'win32' ? home.toLowerCase() : home;
+  const previous = pendingInstalls.get(key);
+  const pending = (previous ?? Promise.resolve()).catch(() => undefined)
+    .then(() => installLlamaServerUnlocked({ ...options, env }));
+  pendingInstalls.set(key, pending);
+  try { return await pending; } finally {
+    if (pendingInstalls.get(key) === pending) pendingInstalls.delete(key);
+  }
+}
+
+async function installLlamaServerUnlocked(options: InstallOptions): Promise<LlamaInstall> {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const vendor = options.gpu?.primary?.vendor;
   const variant = variantFor(platform, arch, vendor);
+  const policy = storagePolicy(env);
   const release = await fetchRelease(options, platform, arch, variant);
   const picked = pickReleaseAsset(release, platform, arch, variant);
   if (!picked.main) {
@@ -411,14 +459,23 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
     }
   }
 
-  const work = join(cacheDir(env), `install-${Date.now()}`);
-  const staging = `${installDir}.tmp`;
+  const id = randomUUID();
+  const work = join(cacheDir(env), `install-${id}`);
+  const staging = `${installDir}.${id}.tmp`;
+  const backup = `${installDir}.${id}.bak`;
+  let backedUp = false;
+  let promoted = false;
   const archiveDir = join(work, 'archives');
   const extractDir = join(work, 'extract');
+  await mkdir(binDir(env), { recursive: true });
+  if (await directoryBytes(binDir(env)) >= MAX_ENGINE_CACHE_BYTES) throw new Error('Engine cache reached 10 GiB; remove unused engine versions while the agent is stopped');
+  // Archives, extracted libraries and staging coexist during installation.
+  await requireDiskSpace(binDir(env), 8 * 1024 ** 3, policy.reserveBytes);
   await mkdir(archiveDir, { recursive: true });
   await mkdir(extractDir, { recursive: true });
   try {
     const assets = [picked.main, ...picked.companions];
+    if (assets.length > 4) throw new Error('Too many companion engine archives');
     let mainSha: string | null = null;
     let anyVerified = true;
     for (const [index, asset] of assets.entries()) {
@@ -440,10 +497,15 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
         options.logger?.warn(`No published SHA-256 for ${asset.name}; recorded the local hash.`);
       }
       if (index === 0) mainSha = actual;
+      await requireDiskSpace(extractDir, 4 * 1024 ** 3, policy.reserveBytes);
       await extractArchive(archive, extractDir);
+      if (await directoryBytes(extractDir) > 4 * 1024 ** 3) throw new Error('Combined engine extraction exceeds 4 GiB');
     }
     const binary = await locateServerBinary(extractDir);
     if (!binary) throw new Error('No llama-server binary found inside the release archive');
+    const extractedBytes = await directoryBytes(extractDir);
+    if (await directoryBytes(binDir(env)) + extractedBytes > MAX_ENGINE_CACHE_BYTES) throw new Error('Engine cache would exceed 10 GiB; remove unused versions while the agent is stopped');
+    await requireDiskSpace(binDir(env), extractedBytes, policy.reserveBytes);
     await rm(staging, { recursive: true, force: true });
     await mkdir(staging, { recursive: true });
     const entries = await readdir(extractDir, { withFileTypes: true });
@@ -457,12 +519,18 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
         if (/^(llama-server|server)(\.exe)?$/i.test(entry.name)) await chmod(target, 0o755).catch(() => undefined);
       }
     }
-    await rm(installDir, { recursive: true, force: true });
+    // Validate and hash the copied candidate before disturbing the previous install.
+    const stagedBinary = await locateServerBinary(staging);
+    if (!stagedBinary) throw new Error('llama-server was extracted but could not be found in staging');
+    await chmod(stagedBinary, 0o755).catch(() => undefined);
+    const binarySha256 = await sha256File(stagedBinary);
+    const installedBinary = join(installDir, relative(staging, stagedBinary));
+    if (await pathExists(installDir)) {
+      await rename(installDir, backup);
+      backedUp = true;
+    }
     await rename(staging, installDir);
-    const installedBinary = await locateServerBinary(installDir);
-    if (!installedBinary) throw new Error('llama-server was extracted but could not be found');
-    await chmod(installedBinary, 0o755).catch(() => undefined);
-    const binarySha256 = await sha256File(installedBinary);
+    promoted = true;
     const install: LlamaInstall = {
       path: installedBinary,
       version,
@@ -478,7 +546,14 @@ export async function installLlamaServer(options: InstallOptions = {}): Promise<
     manifest.installs.push(install);
     manifest.latest = installedBinary;
     await writeManifest(env, manifest);
+    // A failed cleanup must not roll back an already committed manifest.
+    if (backedUp) await rm(backup, { recursive: true, force: true }).catch(() => undefined);
     return install;
+  } catch (error) {
+    // Keep the backup if rollback itself fails, so it remains recoverable.
+    if (promoted) await rm(installDir, { recursive: true, force: true });
+    if (backedUp) await rename(backup, installDir);
+    throw error;
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
