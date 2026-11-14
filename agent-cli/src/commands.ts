@@ -15,7 +15,7 @@ import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
 import { execFile, sleep, toError } from './util/exec.js';
-import { canOpenBrowser, openUrl } from './util/open.js';
+import { canOpenBrowser, openUrl, printable } from './util/open.js';
 import { formatBytes, formatBytesPerSec, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
 import type { AgentMe, AgentRequest } from './types.js';
 import { EXIT, UsageError } from './exitCodes.js';
@@ -145,17 +145,19 @@ export async function deviceLogin(server: string, options: { name: string; onCod
   throw new Error('The login code expired. Run sublera login again.');
 }
 
-function announceLoginCode(code: DeviceLoginCode, flags: GlobalFlags): void {
-  const link = code.verificationUrlComplete || code.verificationUrl;
+/** Shows the device code. The link comes from the server: it is printed without control characters and opened only on the server's own origin. */
+function announceLoginCode(code: DeviceLoginCode, flags: GlobalFlags, server: string): void {
+  const link = printable(String(code.verificationUrlComplete || code.verificationUrl || ''));
+  const userCode = printable(String(code.userCode || ''));
   if (flags.json) {
-    output.write(`${JSON.stringify({ event: 'code', userCode: code.userCode, verificationUrl: link, expiresAt: code.expiresAt })}\n`);
+    output.write(`${JSON.stringify({ event: 'code', userCode, verificationUrl: link, expiresAt: code.expiresAt })}\n`);
     return;
   }
   output.write(`\nLink this computer to your ${BRAND} account:\n`);
   output.write(`  1. Open  ${link}\n`);
-  output.write(`  2. Check that the page shows the code ${code.userCode}, then click Connect.\n\n`);
+  output.write(`  2. Check that the page shows the code ${userCode}, then click Connect.\n\n`);
   output.write(`Waiting for you to connect... (Ctrl+C to stop)\n`);
-  if (!flags.noBrowser && process.stdout.isTTY && canOpenBrowser()) openUrl(link);
+  if (!flags.noBrowser && process.stdout.isTTY && canOpenBrowser()) openUrl(link, server);
 }
 
 async function saveHostKey(server: string, token: string, flags: GlobalFlags): Promise<{ cfg: AgentConfig; me: AgentMe | null }> {
@@ -177,7 +179,7 @@ export async function readyConfig(flags: GlobalFlags, logger: Logger): Promise<A
   if (cfg.token) return cfg;
   if (flags.nonInteractive) throw new UsageError('No host key in non-interactive mode. Run sublera login once, or set SUBLET_KEY.');
   logger.info(`This computer is not connected to ${BRAND} yet. Connect it first.`);
-  const linked = await deviceLogin(cfg.server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
+  const linked = await deviceLogin(cfg.server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags, cfg.server) });
   if (!linked) throw new Error('No host key. Run: sublera login, or pass --key <key>');
   const { cfg: saved, me } = await saveHostKey(cfg.server, linked.token, flags);
   logger.success(`Connected as @${me?.user.username || linked.username}`, { config: configPath() });
@@ -190,7 +192,7 @@ export async function cmdLogin(flags: GlobalFlags, logger: Logger): Promise<numb
   let token = (flags.token || flags.positionals[0] || '').trim();
   if (!token && flags.nonInteractive) throw new UsageError('Non-interactive login requires SUBLET_KEY or --key. No browser login was started.');
   if (!token) {
-    const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags) });
+    const linked = await deviceLogin(server, { name: hostname(), onCode: (code) => announceLoginCode(code, flags, server) });
     token = linked?.token ?? (await promptToken()).trim();
   }
   if (!token) throw new Error('Host key is empty');
@@ -787,7 +789,7 @@ export function globalHelp(): string {
     '  --json                Machine-readable output',
     '  --verbose             Debug logs (same as --log-level debug)',
     '  --log-level <level>   debug, info, warn, error, or silent',
-    '  --log-file <path|off> Agent log file (start/host/jobs default: ~/.sublera/logs/agent.log)',
+    '  --log-file <path|off> Agent log file (start/host/jobs default: ~/.sublet/logs/agent.log)',
     '  --no-color            Disable ANSI colors',
     '  --no-install          Do not auto-download llama-server',
     '  --once                Exit after the first public job (testing)',
@@ -805,7 +807,7 @@ export function globalHelp(): string {
     '',
     'Supported hosting settings can also come from SUBLERA_* variables or',
     'legacy SUBLET_* aliases (SUBLERA_* wins when both are set).',
-    '~/.sublera/agent.json (see: sublera config). Proxies: HTTPS_PROXY, NO_PROXY,',
+    '~/.sublet/agent.json (see: sublera config). Proxies: HTTPS_PROXY, NO_PROXY,',
     'NODE_EXTRA_CA_CERTS. Exit codes: 0 ok, 1 error, 2 usage, 130 Ctrl+C, 143 SIGTERM.',
   ].join('\n');
 }

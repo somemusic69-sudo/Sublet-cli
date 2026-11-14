@@ -1,7 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { hostEndpoint, maskToken, normalizeServer, wsUrl } from '../src/config.js';
-import { canOpenBrowser } from '../src/util/open.js';
+import { browserUrl, canOpenBrowser, printable } from '../src/util/open.js';
+import { DEFAULT_SERVER } from '../src/version.js';
+test('plain http is refused for a server off this machine, unless explicitly allowed', () => {
+  for (const local of ['http://127.0.0.1:8787', 'http://localhost:8787', 'http://[::1]:8787', 'http://127.1.2.3']) assert.doesNotThrow(() => normalizeServer(local, {}), local);
+  assert.throws(() => normalizeServer('http://sublera.example.com', {}), /https/);
+  assert.throws(() => normalizeServer('http://192.168.1.5:8787', {}), /SUBLERA_ALLOW_HTTP/);
+  assert.equal(normalizeServer('http://192.168.1.5:8787', { SUBLERA_ALLOW_HTTP: '1' }), 'http://192.168.1.5:8787');
+  assert.equal(normalizeServer('http://192.168.1.5:8787', { SUBLET_ALLOW_HTTP: '1' }), 'http://192.168.1.5:8787');
+  assert.match(DEFAULT_SERVER, /^https:\/\//);
+});
+test('a link from the server opens only on its own origin, and never as a program or file', () => {
+  const server = 'https://sublera.com';
+  assert.equal(browserUrl('https://sublera.com/link?code=ABCD-EFGH', server), 'https://sublera.com/link?code=ABCD-EFGH');
+  for (const bad of ['https://evil.example/link', 'http://sublera.com/link', 'file:///C:/Windows/System32/calc.exe', '\\\\host\\share\\x.exe', 'javascript:alert(1)', 'https://u:p@sublera.com/', 'not a url']) {
+    assert.equal(browserUrl(bad, server), null, bad);
+  }
+  // `&` and spaces cannot reach a shell: the link is serialized by the URL parser and passed as one argument.
+  assert.equal(browserUrl('https://sublera.com/link?a=1&calc x', server), 'https://sublera.com/link?a=1&calc%20x');
+  assert.equal(browserUrl('https://sublera.com/host'), 'https://sublera.com/host');
+  assert.equal(browserUrl('http://127.0.0.1:8787/host'), 'http://127.0.0.1:8787/host');
+  assert.equal(browserUrl('http://example.com/host'), null);
+  assert.equal(printable('ABCD\u001b]52;c;aGk=\u0007-EFGH'), 'ABCD]52;c;aGk=-EFGH');
+});
 import { parseArgv } from '../src/index.js';
 
 test('server URLs are normalized and websocket URLs keep the token', () => {

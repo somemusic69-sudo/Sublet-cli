@@ -1217,7 +1217,7 @@ export class Agent extends EventEmitter {
   }
 
   private openExternal(url: string): void {
-    openUrl(url);
+    openUrl(url, this.options.config.server);
   }
 
   private async copyText(text: string): Promise<boolean> {

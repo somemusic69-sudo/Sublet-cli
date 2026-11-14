@@ -215,9 +215,11 @@ test('the WebSocket tunnel goes through HTTP_PROXY and the host key stays inside
     auth = String(request.headers.authorization || '');
     socket.send(JSON.stringify({ type: 'welcome', username: 'ada' }));
   });
-  const saved = { http: process.env.HTTP_PROXY, no: process.env.NO_PROXY };
+  const saved = { http: process.env.HTTP_PROXY, no: process.env.NO_PROXY, allow: process.env.SUBLERA_ALLOW_HTTP };
   process.env.HTTP_PROXY = proxy.url;
   process.env.NO_PROXY = '';
+  // A plain-http server off this machine is refused unless allowed; this test needs one to see the proxy CONNECT.
+  process.env.SUBLERA_ALLOW_HTTP = '1';
   const tunnel = new TunnelClient({
     server: `http://sublet-server.test:${port}`,
     token: 'sh_test123456',
@@ -235,6 +237,7 @@ test('the WebSocket tunnel goes through HTTP_PROXY and the host key stays inside
     await tunnel.stop();
     if (saved.http == null) delete process.env.HTTP_PROXY; else process.env.HTTP_PROXY = saved.http;
     if (saved.no == null) delete process.env.NO_PROXY; else process.env.NO_PROXY = saved.no;
+    if (saved.allow == null) delete process.env.SUBLERA_ALLOW_HTTP; else process.env.SUBLERA_ALLOW_HTTP = saved.allow;
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     await proxy.close();
   }

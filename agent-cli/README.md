@@ -33,12 +33,10 @@ Postgres/SQLite ledger, wallet, reliability, request board
   `~/.sublera`: old and new names share credentials, model/engine cache, recovery
   state, and the instance lock. Do not move it merely for the rebrand. Existing
   model `.sublet.json` metadata filenames are unchanged.
-- The actual repository remains `somemusic69-sudo/Sublet-cli` and the actual
-  server remains `https://sublet.duckdns.org`. No new domain, repository, or
-  package publication is claimed. npm availability of `sublera-cli` is unverified.
-- Any `npx sublera-cli` or version-pinned registry examples below are conditional
-  on a separately verified, trusted publication. They are not evidence that a
-  package exists on npm. Use a local build until availability is verified.
+- The repository remains `somemusic69-sudo/Sublet-cli`. The default server is
+  `https://sublera.com` (it was `https://sublet.duckdns.org` before 1.3.0).
+- The npm package is `sublera-cli`, published only by the Release workflow
+  (`.github/workflows/release.yml`) with npm provenance.
 
 ## Quick start
 
@@ -58,8 +56,10 @@ For subsequent examples, use `node dist/index.js` in place of `sublera` or
 On the first run, `start` opens the Sublera website so you can connect this
 computer (click **Connect**), installs the matching `llama-server` build (CUDA
 for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback), and
-then waits for work. During the beta the default server is
-`https://sublet.duckdns.org`; `--server <url>` uses another Sublera server.
+then waits for work. The default server is `https://sublera.com`;
+`--server <url>` uses another Sublera server. Servers must use https, except on
+this machine (`localhost`, `127.0.0.1`); `SUBLERA_ALLOW_HTTP=1` allows plain http
+for a test server on a trusted network.
 
 `sublera doctor` checks the machine (`--fix` installs the engine ahead of time).
 `sublera login` connects the computer again; on a machine without a browser,
@@ -290,7 +290,7 @@ When both environment names are set, `SUBLERA_*` wins. This also applies to
 
 ```json
 {
-  "server": "https://sublet.duckdns.org",
+  "server": "https://sublera.com",
   "context": 8192,
   "slots": 4,
   "price": 0.25,
@@ -516,11 +516,8 @@ For local package inspection only:
 npm pack --dry-run
 ```
 
-npm availability is unverified. This documentation rebrand does not publish a
-package or claim a registry migration. Do not treat registry-based examples as
-installation instructions until the package and publisher are independently
-verified. Release workflow artifact names use `sublera-cli`; changing those names
-does not itself publish anything.
+Releases are published to npm as `sublera-cli` by the Release workflow, never
+from a laptop. Check a release's provenance on its npm page.
 
 ## Verification status
 

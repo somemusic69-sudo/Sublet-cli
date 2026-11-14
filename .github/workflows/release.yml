@@ -1,7 +1,6 @@
 name: Release
 
-# Artifact branding is sublera-cli; npm availability is unverified.
-# This rename does not claim a new domain, repository, or completed publication.
+# Publishes the sublera-cli package.
 # Publishing happens only here, never from a laptop. Push a tag that matches
 # agent-cli/package.json (for example v1.3.0) and this workflow verifies,
 # publishes to npm with provenance, and creates the GitHub release.

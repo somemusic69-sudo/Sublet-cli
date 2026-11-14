@@ -9,9 +9,8 @@ peer-to-peer compute market.
 
 The central website/server and ledger live in a separate repository that is
 not public yet. The CLI is intentionally a separate package so hosts can update it without
-redeploying the marketplace. Its local package name is `sublera-cli`; npm
-availability is unverified. This rebrand does not claim a new package publication,
-repository, or domain.
+redeploying the marketplace. Its npm package is `sublera-cli`, and its default
+server is `https://sublera.com`.
 
 ## Migration from Sublet
 
@@ -20,8 +19,8 @@ The old `sublet` / `sublet-cli` aliases and `SUBLET_*` environment variables rem
 supported; when both environment names are set, `SUBLERA_*` wins.
 The default `~/.sublet` directory is intentionally unchanged so both names share
 credentials, cache, and the instance lock. Model `.sublet.json` metadata is also
-unchanged. The repository remains `somemusic69-sudo/Sublet-cli` and the actual
-server remains `https://sublet.duckdns.org`.
+unchanged. The repository remains `somemusic69-sudo/Sublet-cli`. The default
+server moved from `https://sublet.duckdns.org` to `https://sublera.com`.
 See the [CLI migration guide](agent-cli/README.md#migration-from-sublet) for details.
 
 ## License

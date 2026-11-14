@@ -8,7 +8,21 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
 
+### Changed
+- The default server is now `https://sublera.com` (was `https://sublet.duckdns.org`).
+  `--server`, `SUBLERA_SERVER` and saved configs still choose another one.
+
+### Security
+- The device-login link from the server is opened only when it is on the
+  server's own origin. On Windows it is opened through `rundll32.exe` by full
+  path instead of `cmd /c start`, so a link can no longer run commands.
+- Plain-http servers are refused unless they are on this machine, because the
+  host key travels in every request. `SUBLERA_ALLOW_HTTP=1` allows a test server
+  on a trusted network.
+- Server text in the login prompt is printed without control characters.
+
 ### Fixed
+- `--help` named `~/.sublera` for logs and `agent.json`; the files are in `~/.sublet`.
 - Update the CI packed-package smoke test to install `sublera-cli` and exercise
   both the new `sublera` executable and the legacy `sublet` alias.
 - Refuse linked model roots before pruning; concurrent instance-lock release
@@ -26,8 +40,8 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 ### Added
 - Sublera branding, local package name `sublera-cli`, and `sublera` executable
   aliases. Legacy executables and `SUBLET_*` environment names remain supported;
-  `SUBLERA_*` names take precedence. The default `.sublet` data directory,
-  server endpoint and repository identity are unchanged. No publication implied.
+  `SUBLERA_*` names take precedence. The default `.sublet` data directory and
+  repository identity are unchanged.
 - Exclusive `SUBLET_HOME` ownership for serving agents and storage maintenance;
   stale locks fail closed with explicit operator recovery instructions.
 - Local `health [live|ready]` snapshots, bounded SIGTERM inference drain, and
