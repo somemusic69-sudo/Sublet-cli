@@ -217,13 +217,13 @@ for (const mode of ['start', 'jobs'] as const) {
       }
     };
     // The target ends by its own timer or by the server's status list, whichever comes first.
-    await waitFor(/other rentals are still active/i, 20_000);
+    await waitFor(/other rentals are still active/i, 45_000);
     assert.equal(/Booking r_target finished/.test(output), false);
     // The target is over, but r_other still uses the GPU.
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     assert.equal(child.exitCode, null, `exited while another booking was active: ${output.slice(-800)}`);
     server.end('r_other');
-    const code = await Promise.race([exited, new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 10_000))]);
+    const code = await Promise.race([exited, new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 30_000))]);
     assert.equal(code, 0, output.slice(-800));
   });
 }

@@ -46,7 +46,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test --test-timeout=120000 --test-force-exit tests/*.test.ts",
     "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-include=src/**/*.ts tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs",

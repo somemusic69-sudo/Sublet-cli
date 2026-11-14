@@ -1,12 +1,16 @@
 # Changelog
 
-All notable changes to `sublet-cli` are listed here. The project follows
+All notable changes to `sublera-cli` (formerly `sublet-cli`) are listed here. The project follows
 [Semantic Versioning](https://semver.org/). The stable surface is: command
 names, flags, `SUBLET_*` variables, `agent.json` keys, exit codes, the
 `--json` output of `doctor` and `config` (versioned by `schemaVersion`), and
 the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
+
+## [1.3.0] - 2026-11-14
+
+First release as `sublera-cli` (formerly `sublet-cli`).
 
 ### Changed
 - The default server is now `https://sublera.com` (was `https://sublet.duckdns.org`).
@@ -93,7 +97,6 @@ the files under `~/.sublet`. A change to any of these needs a major version.
   and staging-space preflight checks. Model downloads serialize within one
   process to avoid spending the same budget concurrently.
 
-## [1.3.0] - 2026-11-12
 
 ### Added
 - **Corporate proxy support.** `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`

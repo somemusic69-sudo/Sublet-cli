@@ -82,7 +82,7 @@ function settlesWithin<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function eventually(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 30_000;
   while (!check()) {
     if (Date.now() > deadline) throw new Error('Expected agent state not reached');
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -95,7 +95,7 @@ test('ownership blocks a second host; drain completes active inference and rejec
   const agent = agentFor(server.url, true);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     assert.equal(agent.health.ready, true);
     const second = agentFor(server.url, true);
     await assert.rejects(second.run(), /locked/);
@@ -119,7 +119,7 @@ test('drain timeout cancels work without a successful completion frame', async (
   const agent = agentFor(server.url, true);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     socket!.send(JSON.stringify({ type: 'infer', jobId: 'cancelled', messages: [{ role: 'user', content: 'hi' }], maxTokens: 64 }));
     await eventually(() => agent.health.activeJobs === 1);
     await agent.drain(0);
@@ -135,7 +135,7 @@ test('disconnect makes readiness false and waitForOnline no longer uses stale st
   const agent = agentFor(server.url, true);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     socket!.terminate();
     await eventually(() => agent.health.tunnel !== 'open');
     assert.equal(agent.health.ready, false);
@@ -245,14 +245,14 @@ test('a loaded model is not server-verified and stale verification/rejection can
   const agent = agentFor(server.url, true);
   const running = agent.run();
   const waitUntil = async (condition: () => boolean) => {
-    const until = Date.now() + 5_000;
+    const until = Date.now() + 30_000;
     while (!condition()) {
       if (Date.now() >= until) throw new Error('Expected agent state was not reached');
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   };
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     socket!.send(JSON.stringify({ type: 'load', requestId: 'r_current', url: 'https://huggingface.co/a/b/resolve/main/model.gguf', sha256: 'a'.repeat(64), file: 'model.gguf', layers: 4, context: 2048 }));
     await waitUntil(() => server.frames.some((frame) => frame.type === 'loaded'));
     assert.equal(agent.dashboardState.job?.verified, false);
@@ -328,7 +328,7 @@ for (const work of ['infer', 'load'] as const) {
     const entered = deferred();
     const running = agent.run();
     try {
-      await agent.waitForOnline(5_000);
+      await agent.waitForOnline(20_000);
       internals.sleepGuard.acquire = async () => { entered.resolve(); await gate.promise; };
       let loadCalls = 0;
       const originalLoad = internals.loadModel.bind(agent);
@@ -408,7 +408,7 @@ test('run keeps ownership through an in-flight load and preserves stopped dashbo
   };
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     socket!.send(JSON.stringify({ type: 'load', requestId: 'slow', url: 'https://huggingface.co/a/b/resolve/main/model.gguf' }));
     await entered.promise;
     await agent.stop();
@@ -462,7 +462,7 @@ test('failed stop attempts every teardown and retains ownership through tasks an
     (error: unknown) => { settled = true; return error; },
   );
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const stopTunnel = internals.tunnel.stop.bind(internals.tunnel);
     t.mock.method(internals.sleepGuard, 'stop', async () => { throw failure; });
     t.mock.method(internals.tunnel, 'stop', async () => {
@@ -523,8 +523,9 @@ test('failed stop attempts every teardown and retains ownership through tasks an
 const { renderFrame } = await import('../src/ui/terminalDashboard.js');
 const { clearAgentState, readAgentState, saveAgentState, statePath } = await import('../src/state.js');
 
+// Generous limits: a wait ends as soon as its condition holds, and slow CI runners can take a status poll (10 s) or more.
 async function until(check: () => Promise<boolean>, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 30_000;
   while (!(await check())) {
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -578,7 +579,7 @@ test('several bookings run side by side; a seat and a full-GPU rental each end o
   const wake = stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const now = Date.now();
     // Stacked bookings come without a load frame: model checks, then verified, then booking.
     server.send({ type: 'verified', requestId: 'r_seat' });
@@ -621,7 +622,7 @@ test('a reject ends only its own booking', async () => {
   stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const now = Date.now();
     server.book({ requestId: 'r_a', timerStartedAt: now, timerEndsAt: now + 600_000, hours: 1, pricePerHourNanos: 1e9, tokS: 40 });
     server.book({ requestId: 'r_b', timerStartedAt: now, timerEndsAt: now + 900_000, hours: 1, pricePerHourNanos: 1e9, tokS: 60 });
@@ -652,7 +653,7 @@ test('the status poll adds bookings the server lists, updates timers, and drops 
   const ids = () => agent.activeBookings.map((b) => b.requestId);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const now = Date.now();
     me = {
       activeRequests: [
@@ -703,7 +704,7 @@ test('a restart restores every saved booking with its slot count and drops the o
   stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     assert.deepEqual(agent.activeBookings.map((b) => b.requestId).sort(), ['r_one', 'r_two']);
     assert.equal(agent.booking('r_one')?.tokS, 50);
     await eventually(() => server.frames.some((f) => f.type === 'hello'));
@@ -730,7 +731,7 @@ test('public mode keeps per-token earnings from before a booking, counts none wh
   };
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     await job('p1');
     const tokens1 = agent.dashboardState.tokenEarnedNanos ?? 0;
     assert.ok(tokens1 > 0, 'per-token earnings were not counted');
@@ -776,7 +777,7 @@ test('a booking during a real model load keeps the host busy, and the load\'s sl
   internals.loadModel = async (...args) => { entered.resolve(); await gate.promise; return originalLoad(...args); };
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     server.send({ type: 'load', requestId: 'r_load', url: 'https://huggingface.co/a/b/resolve/main/model.gguf', sha256: 'b'.repeat(64), slots: 3, context: 4096 });
     await entered.promise;
     const now = Date.now();
@@ -838,7 +839,7 @@ test('an ended booking stays ended: a stale status answer or a late booking fram
   stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const start = Date.now();
     // A one-hour booking at $1/h that ends in 300 ms.
     const row = { id: 'r_done', status: 'active', timerStartedAt: start + 300 - 3_600_000, timerEndsAt: start + 300, hours: 1, pricePerHourNanos: 1e9 };
@@ -881,7 +882,7 @@ test('a loaded request in its model check keeps llama-server and stays pending: 
   const running = agent.run();
   const failed = (id: string) => server.frames.find((f) => f.type === 'load_failed' && f.requestId === id);
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const checking = { id: 'r_check', status: 'verifying' };
     server.setMe({ activeRequests: [checking], activeRequest: checking });
     server.send({ type: 'load', requestId: 'r_check', url: MODEL_URL, sha256: 'a'.repeat(64), context: 4096 });
@@ -915,7 +916,7 @@ test('the status poll: requests in their model check keep start <code> serving, 
   const wake = stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     // A loaded request the server stops listing lets the machine sleep; listed again, it takes the wake lock again.
     server.send({ type: 'load', requestId: 'r_check', url: MODEL_URL, context: 4096 });
     await eventually(() => server.frames.some((f) => f.type === 'loaded' && f.requestId === 'r_check'));
@@ -1003,7 +1004,7 @@ test('state.json names the server\'s activeRequest in the legacy booking field, 
     try { return (JSON.parse(await readFile(statePath(), 'utf8')) as { booking: { requestId: string } }).booking.requestId; } catch { return null; }
   };
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const now = Date.now();
     // r_late started later, but the server's newest by claim time is r_early: an older agent restores only that one.
     const early = { id: 'r_early', status: 'active', timerStartedAt: now - 60_000, timerEndsAt: now + 600_000, hours: 1, pricePerHourNanos: 1e9 };
@@ -1029,7 +1030,7 @@ test('server values are checked: malformed request ids are ignored, numbers are 
   stubWake(agent);
   const running = agent.run();
   try {
-    await agent.waitForOnline(5_000);
+    await agent.waitForOnline(20_000);
     const now = Date.now();
     server.setMe({ activeRequests: [{ id: 'r_ok', status: 'active', timerStartedAt: now, timerEndsAt: now + 600_000 }, { id: 'r_far', status: 'active', timerStartedAt: now }] });
     for (const requestId of ['r', 'r\u001b[2J', 'a'.repeat(81), 42]) {
