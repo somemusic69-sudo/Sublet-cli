@@ -107,3 +107,25 @@ test('settings: a broken or misspelled agent.json and bad values are clear error
 test('exit codes are a stable contract', () => {
   assert.deepEqual(EXIT, { OK: 0, ERROR: 1, USAGE: 2, INTERRUPTED: 130, TERMINATED: 143 });
 });
+test('settings: the hourly price comes from SUBLERA_PRICE_HOUR, legacy SUBLET_PRICE_HOUR, or agent.json, within 0 to 50', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-settings-'));
+  try {
+    const file = join(dir, 'agent.json');
+    await writeFile(file, JSON.stringify({ priceHour: 2 }));
+    const base = { SUBLET_CONFIG: file };
+    assert.deepEqual([resolveSettings({}, base).values.priceHour, resolveSettings({}, base).sources.priceHour], [2, 'file']);
+    const legacy = resolveSettings({}, { ...base, SUBLET_PRICE_HOUR: '1.25' });
+    assert.deepEqual([legacy.values.priceHour, legacy.sources.priceHour], [1.25, 'env']);
+    assert.equal(resolveSettings({}, { ...base, SUBLERA_PRICE_HOUR: '3', SUBLET_PRICE_HOUR: '1' }).values.priceHour, 3);
+    assert.deepEqual(readSettingsEnv({ SUBLERA_PRICE_HOUR: '0' }), { priceHour: 0 });
+    assert.throws(() => resolveSettings({}, { ...base, SUBLERA_PRICE_HOUR: '51' }), /priceHour must be between 0 and 50/);
+    assert.throws(() => readSettingsEnv({ SUBLERA_PRICE_HOUR: '-1' }), /must not be negative/);
+    const parsed = parseArgv(['host', 'model.gguf', '--price-hour', '0.75']);
+    assert.equal(parsed.flags.priceHour, 0.75);
+    applySettings(parsed.flags, parsed.explicit, { ...base, SUBLERA_PRICE_HOUR: '9' });
+    assert.equal(parsed.flags.priceHour, 0.75, 'a typed flag is never overridden');
+    assert.throws(() => parseArgv(['host', 'model.gguf', '--price-hour', '50.5']), /--price-hour must be between 0 and 50/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

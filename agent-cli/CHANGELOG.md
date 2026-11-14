@@ -22,6 +22,25 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 - Server text in the login prompt is printed without control characters.
 
 ### Fixed
+- `start <code>` and `jobs` no longer exit when a different booking appears. They
+  exit when their own booking has ended and no other booking uses the GPU.
+- A booking that ended is no longer added back (and its earnings counted twice)
+  by a status answer from before the end. The server's clock decides whether a
+  listed booking is over.
+- A load for another request is refused with "Host is busy" while a loaded request
+  is still in its model check or a benchmark runs, instead of restarting
+  llama-server or replacing that request.
+- `start <code>` and `jobs` also keep running while another request on this host
+  is claimed, loading or in its model check.
+- A booking the agent learns about from the status poll now keeps the machine awake.
+- A booking frame no longer clears the busy flag of a model load in progress.
+- llama-server is restarted when the slot count changes, but only when no job or
+  other booking uses it; otherwise the agent keeps it and logs a warning.
+- A load for the file that is already running with the same settings reuses
+  llama-server and skips the VRAM check, which counted the loaded model twice.
+  A load that would replace the model under other bookings or public buyers is refused.
+- The saved booking keeps the slot count of its load instead of 1.
+- Per-token earnings are no longer overwritten on the dashboard when a booking starts.
 - `--help` named `~/.sublera` for logs and `agent.json`; the files are in `~/.sublet`.
 - Update the CI packed-package smoke test to install `sublera-cli` and exercise
   both the new `sublera` executable and the legacy `sublet` alias.
@@ -42,6 +61,22 @@ the files under `~/.sublet`. A change to any of these needs a major version.
   aliases. Legacy executables and `SUBLET_*` environment names remain supported;
   `SUBLERA_*` names take precedence. The default `.sublet` data directory and
   repository identity are unchanged.
+- Several bookings at once on one loaded model: speed seats (a reserved tok/s)
+  side by side, a full-GPU rental, and per-token buyers in public mode. Each
+  booking has its own end timer, and a `reject` ends only its own request.
+  Bookings on the loaded model are accepted without a `load` frame.
+- `--price-hour <usd>` (`SUBLERA_PRICE_HOUR`, legacy `SUBLET_PRICE_HOUR`,
+  `agent.json` key `priceHour`, 0 to 50): the price per hour for the full GPU in
+  `sublera host`. It is sent as `priceHourUsd` in `hello` (default 0.50; `start`
+  and `jobs` send 0). The server sets seat prices from it.
+- The dashboard shows every rental and its reserved speed, the one that ends
+  first, and the hourly price in public mode. Earnings are per-token earnings
+  plus the time share of every booking. `sublera status` lists every booking.
+- `state.json` saves every booking in a `bookings` list, and a restart restores
+  all of them with their slot count. Files with the old single `booking` field
+  are still read.
+- The agent reads `activeRequests` from `/api/agent/me` and falls back to
+  `activeRequest` on older servers. Bookings the server no longer lists are dropped.
 - Exclusive `SUBLET_HOME` ownership for serving agents and storage maintenance.
   A lock left by a process that is no longer running is taken over, so an agent
   restarted after a crash restores its booking; a live or unreadable owner's lock

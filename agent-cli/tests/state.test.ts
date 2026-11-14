@@ -47,7 +47,8 @@ test('a booking survives a crash and is read back for recovery', async () => {
     await saveAgentState(state, env);
     assert.equal(statePath(env), join(home, 'state.json'));
     const read = await readAgentState(env);
-    assert.deepEqual(read, state);
+    // A file with only the legacy `booking` field reads back as a list of one.
+    assert.deepEqual(read, { ...state, bookings: [state.booking] });
     await clearAgentState(env);
     assert.equal(await readAgentState(env), null);
   } finally {
@@ -96,6 +97,68 @@ test('simulation bookings with no local model path are still valid state', async
     assert.equal(read?.booking.model.path, '');
   } finally {
     await clearAgentState(env);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+test('every booking is saved, and a file from an older agent with one booking still reads back', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-state-'));
+  const env = { ...process.env, SUBLET_HOME: home };
+  const { writeFile } = await import('node:fs/promises');
+  const booking = (requestId: string, slots: number, extra: Record<string, unknown> = {}) => ({
+    requestId, model, context: 4096, slots, timerStartedAt: 1_000, timerEndsAt: Date.now() + 60_000, hours: 1,
+    pricePerHourNanos: 100, minTokS: null, guaranteedNanos: 100, savedAt: Date.now(), ...extra,
+  });
+  const seat = booking('req_seat', 4, { shared: true, tokS: 50 });
+  const full = booking('req_full', 1);
+  try {
+    await saveAgentState({ version: 1, booking: seat, bookings: [seat, full], updatedAt: 1 }, env);
+    let read = await readAgentState(env);
+    assert.deepEqual(read?.bookings.map((b) => [b.requestId, b.slots, b.tokS ?? null]), [['req_seat', 4, 50], ['req_full', 1, null]]);
+    assert.equal(read?.booking.requestId, 'req_seat');
+    // Written by 1.3.0 and older: only the single `booking` field.
+    await writeFile(statePath(env), JSON.stringify({ version: 1, booking: full, updatedAt: 1 }), 'utf8');
+    read = await readAgentState(env);
+    assert.deepEqual(read?.bookings.map((b) => b.requestId), ['req_full']);
+    // Broken entries are skipped and the repeated newest booking is read once.
+    await writeFile(statePath(env), JSON.stringify({ version: 1, booking: seat, bookings: [{ requestId: '' }, null, full, seat], updatedAt: 1 }), 'utf8');
+    read = await readAgentState(env);
+    assert.deepEqual(read?.bookings.map((b) => b.requestId), ['req_full', 'req_seat']);
+    await writeFile(statePath(env), JSON.stringify({ version: 1, booking: {}, bookings: [{}] }), 'utf8');
+    assert.equal(await readAgentState(env), null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+test('numbers in state.json are checked: numeric strings count, broken values become null, a booking without a valid end is dropped', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-state-'));
+  const env = { ...process.env, SUBLET_HOME: home };
+  const { writeFile } = await import('node:fs/promises');
+  const ends = Date.now() + 60_000;
+  try {
+    await writeFile(statePath(env), JSON.stringify({
+      version: 1,
+      bookings: [
+        {
+          requestId: 'req_text', model, context: '4096', slots: '3', timerStartedAt: '1000', timerEndsAt: String(ends), hours: '2',
+          pricePerHourNanos: '100', minTokS: 'fast', guaranteedNanos: '200', tokS: '50', shared: 'yes', savedAt: 'x',
+        },
+        { requestId: 'req_nan', model, timerEndsAt: 'soon' },
+        { requestId: 'req_huge', model, timerEndsAt: 1e300 },
+        { requestId: 'req_none', model },
+        { requestId: 'bad id', model, timerEndsAt: ends },
+      ],
+      booking: { requestId: 'req_negative', model, timerEndsAt: -5 },
+    }), 'utf8');
+    const read = await readAgentState(env);
+    assert.deepEqual(read?.bookings.map((b) => b.requestId), ['req_text']);
+    const b = read!.bookings[0]!;
+    assert.deepEqual(
+      [b.context, b.slots, b.timerStartedAt, b.timerEndsAt, b.hours, b.pricePerHourNanos, b.minTokS, b.guaranteedNanos, b.tokS, b.shared, b.savedAt],
+      [4096, 3, 1000, ends, 2, 100, null, 200, 50, false, 0],
+    );
+    await writeFile(statePath(env), JSON.stringify({ version: 1, booking: { requestId: 'req_nan', model, timerEndsAt: null } }), 'utf8');
+    assert.equal(await readAgentState(env), null);
+  } finally {
     await rm(home, { recursive: true, force: true });
   }
 });

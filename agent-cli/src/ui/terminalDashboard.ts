@@ -13,6 +13,10 @@ export type DashboardJob = {
   minTokS?: number | null;
   guaranteedNanos?: number | null;
   hours?: number | null;
+  /** A speed seat that shares the GPU. */
+  shared?: boolean;
+  /** Reserved speed of a seat; null means the full GPU. */
+  tokS?: number | null;
 };
 
 export type DashboardState = {
@@ -30,10 +34,20 @@ export type DashboardState = {
   gpuUtilPct: number | null;
   wakeLock: boolean;
   llamaStatus: string;
+  /** The request in focus: the one loading or being checked, else the booking that ends first. */
   job: DashboardJob | null;
+  /** Every booking on this host, soonest end first. */
+  bookings?: DashboardJob[];
   liveTokPerSec: number | null;
+  /** Per-token earnings plus the time-proportional share of every booking. */
   sessionEarnedNanos: number;
   sessionGuaranteedNanos: number;
+  /** The per-token part of sessionEarnedNanos. */
+  tokenEarnedNanos?: number;
+  publicMode?: boolean;
+  /** Public mode prices, shown on the dashboard. */
+  priceOutUsd?: number | null;
+  priceHourUsd?: number | null;
   walletNanos: number | null;
   lastHeartbeatAt: number | null;
   message: string | null;
@@ -59,9 +73,14 @@ export function initialState(server: string): DashboardState {
     wakeLock: false,
     llamaStatus: 'not started',
     job: null,
+    bookings: [],
     liveTokPerSec: null,
     sessionEarnedNanos: 0,
     sessionGuaranteedNanos: 0,
+    tokenEarnedNanos: 0,
+    publicMode: false,
+    priceOutUsd: null,
+    priceHourUsd: null,
     walletNanos: null,
     lastHeartbeatAt: null,
     message: null,
@@ -101,12 +120,49 @@ function thermalLine(state: DashboardState): string {
   return `${temp} · ${power} · ${lock}`;
 }
 
+function tokS(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+/** A positive finite number, or null: a broken value never prints as NaN (or throws in toFixed). */
+function positive(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** "50 tok/s" for a speed seat, "full GPU" for an exclusive rental. */
+export function rentalLabel(job: DashboardJob): string {
+  const speed = positive(job.tokS);
+  if (speed) return `${tokS(speed)} tok/s`;
+  return job.shared ? 'shared seat' : 'full GPU';
+}
+
+/** "2 rentals: 50 tok/s + full GPU"; with more than three, "4 rentals, 150 tok/s reserved". */
+export function rentalsSummary(rentals: DashboardJob[]): string {
+  if (rentals.length <= 3) return `${rentals.length} rental${rentals.length === 1 ? '' : 's'}: ${rentals.map(rentalLabel).join(' + ')}`;
+  const reserved = rentals.reduce((sum, job) => sum + (positive(job.tokS) ?? 0), 0);
+  const full = rentals.some((job) => !positive(job.tokS) && !job.shared) ? ' + full GPU' : '';
+  return `${rentals.length} rentals, ${tokS(reserved)} tok/s reserved${full}`;
+}
+
 function jobLine(state: DashboardState): string {
   const job = state.job;
+  const rentals = state.bookings ?? [];
+  const single = rentals[0];
+  // One full-GPU rental keeps the classic label; seats, several rentals, or public selling list every rental.
+  if (rentals.length > 1 || (single && (state.publicMode || single.tokS || single.shared))) {
+    const loading = job?.kind === 'request' && job.id && !rentals.some((rental) => rental.id === job.id) ? ' + 1 loading' : '';
+    return `${state.publicMode ? 'Per-token + ' : ''}${rentalsSummary(rentals)}${loading}`;
+  }
   if (!job) return 'Standby - waiting for a web request';
   if (job.kind === 'public') return `Public pay-per-token${job.model ? ` · ${modelShortName(job.model)}` : ''}`;
   if (job.id?.startsWith('bench_')) return 'Benchmark: measuring this GPU (no buyer)';
   return `Dedicated Buyer Request${job.id ? ` (#${job.id.replace(/^req_/, '').slice(0, 12)})` : ''}`;
+}
+
+function pricesLine(state: DashboardState): string | null {
+  if (!state.publicMode || state.priceOutUsd == null) return null;
+  const hourly = state.priceHourUsd && state.priceHourUsd > 0 ? `$${state.priceHourUsd.toFixed(2)}/h full GPU` : 'no hourly rentals';
+  return `$${state.priceOutUsd.toFixed(2)} per 1M tokens · ${hourly}`;
 }
 
 function modelLine(state: DashboardState): string {
@@ -117,22 +173,30 @@ function modelLine(state: DashboardState): string {
 }
 
 function timerLine(state: DashboardState): string {
-  const job = state.job;
+  // With several rentals, show the one that ends first.
+  const timed = (state.bookings ?? []).filter((rental) => rental.timerEndsAt)
+    .sort((a, b) => (a.timerEndsAt ?? 0) - (b.timerEndsAt ?? 0));
+  const job = timed[0] ?? state.job;
   if (!job?.timerEndsAt) return job?.kind === 'request' ? 'Timer starts after the model is verified' : '-';
   const remaining = Math.max(0, Math.floor((job.timerEndsAt - Date.now()) / 1000));
   const total = job.hours ? Math.round(job.hours * 3600) : Math.max(remaining, 1);
-  return `${formatClock(remaining)} / ${formatClock(total)}`;
+  return `${formatClock(remaining)} / ${formatClock(total)}${timed.length > 1 ? ` · first of ${timed.length} to end` : ''}`;
 }
 
 function speedLine(state: DashboardState): string {
   const speed = formatSpeed(state.liveTokPerSec);
-  const min = state.job?.minTokS ? ` (min required: ${state.job.minTokS.toFixed(1)} tok/s${state.liveTokPerSec != null && state.liveTokPerSec >= state.job.minTokS ? ' ✓' : ' !'})` : '';
+  const reserved = (state.bookings ?? []).reduce((sum, job) => sum + (positive(job.tokS) ?? 0), 0);
+  if (reserved > 0) return `${speed} (${tokS(reserved)} tok/s reserved by seats)`;
+  const minTokS = positive(state.job?.minTokS);
+  const min = minTokS ? ` (min required: ${minTokS.toFixed(1)} tok/s${state.liveTokPerSec != null && state.liveTokPerSec >= minTokS ? ' ✓' : ' !'})` : '';
   return `${speed}${min}`;
 }
 
 function earningsLine(state: DashboardState): string {
-  const guaranteed = state.job?.guaranteedNanos ?? state.sessionGuaranteedNanos;
-  return `${formatUsdNanos(state.sessionEarnedNanos)}${guaranteed > 0 ? ` / ${formatUsdNanos(guaranteed)} Guaranteed` : ' this session'}`;
+  const guaranteed = state.bookings?.length ? state.sessionGuaranteedNanos : (state.job?.guaranteedNanos ?? state.sessionGuaranteedNanos);
+  const tokens = state.tokenEarnedNanos ?? 0;
+  const split = tokens > 0 && state.sessionEarnedNanos > tokens ? ` (${formatUsdNanos(tokens)} per-token)` : '';
+  return `${formatUsdNanos(state.sessionEarnedNanos)}${split}${guaranteed > 0 ? ` / ${formatUsdNanos(guaranteed)} Guaranteed` : ' this session'}`;
 }
 
 export function renderFrame(state: DashboardState, options: { width?: number; color?: boolean; unicode?: boolean } = {}): string {
@@ -179,6 +243,8 @@ export function renderFrame(state: DashboardState, options: { width?: number; co
   add(`GPU Temp/Power: ${thermalLine(state)}`);
   lines.push(divider);
   add(`CURRENT JOB   : ${jobLine(state)}`);
+  const prices = pricesLine(state);
+  if (prices) add(`Prices        : ${prices}`);
   add(`Model Loaded  : ${modelLine(state)}`);
   add(`Time Remaining: ${timerLine(state)}`);
   add(`Live Speed    : ${speedLine(state)}`);

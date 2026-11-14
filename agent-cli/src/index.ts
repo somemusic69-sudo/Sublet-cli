@@ -54,6 +54,7 @@ const VALUE_FLAGS: Record<string, keyof GlobalFlags> = {
   '--price': 'price',
   '--price-in': 'priceIn',
   '--price-out': 'priceOut',
+  '--price-hour': 'priceHour',
   '--gpu': 'gpu',
   '--vram': 'vram',
   '--tok-s': 'tokPerSec',
@@ -64,7 +65,7 @@ const VALUE_FLAGS: Record<string, keyof GlobalFlags> = {
   '--drain-timeout': 'drainTimeoutMs',
 };
 
-const NUMERIC = new Set<keyof GlobalFlags>(['context', 'slots', 'price', 'priceIn', 'priceOut', 'vram', 'tokPerSec', 'timeoutMs', 'drainTimeoutMs']);
+const NUMERIC = new Set<keyof GlobalFlags>(['context', 'slots', 'price', 'priceIn', 'priceOut', 'priceHour', 'vram', 'tokPerSec', 'timeoutMs', 'drainTimeoutMs']);
 const INTEGER = new Set<keyof GlobalFlags>(['context', 'slots', 'vram', 'drainTimeoutMs']);
 
 function numberFlag(name: string, raw: string, integer: boolean): number {
@@ -134,6 +135,7 @@ export function parseArgv(argv: string[]): Parsed {
   }
   if (explicit.has('slots') && (flags.slots! < 1 || flags.slots! > 16)) throw new Error('--slots must be between 1 and 16');
   if (explicit.has('context') && flags.context! < 256) throw new Error('--ctx must be at least 256 tokens');
+  if (explicit.has('priceHour') && flags.priceHour! > 50) throw new Error('--price-hour must be between 0 and 50 USD');
   return { flags, command, explicit };
 }
 

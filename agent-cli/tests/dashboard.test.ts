@@ -105,3 +105,68 @@ test('a benchmark test load is shown as a benchmark, not as a buyer request', ()
   assert.match(frame, /Benchmark: measuring this GPU/);
   assert.doesNotMatch(frame, /Dedicated Buyer Request/);
 });
+test('several rentals show their reserved speeds, the soonest end, and the per-token part of the earnings', () => {
+  const state = initialState('http://127.0.0.1:8787');
+  const now = Date.now();
+  const seat = { kind: 'request' as const, id: 'r_seat', model: 'm.gguf', verified: true, timerStartedAt: now, timerEndsAt: now + 3_600_000, hours: 1, minTokS: 50, guaranteedNanos: 1e9, shared: true, tokS: 50 };
+  const full = { ...seat, id: 'r_full', timerEndsAt: now + 7_200_000, hours: 2, minTokS: null, guaranteedNanos: 2e9, shared: false, tokS: null };
+  state.status = 'working';
+  state.job = seat;
+  state.bookings = [seat, full];
+  state.sessionEarnedNanos = 1_250_000_000;
+  state.tokenEarnedNanos = 250_000_000;
+  state.sessionGuaranteedNanos = 3e9;
+  let frame = renderFrame(state, { width: 80, color: false });
+  assert.match(frame, /CURRENT JOB\s+: 2 rentals: 50 tok\/s \+ full GPU/);
+  assert.match(frame, /Time Remaining: (00:59:5\d|01:00:00) \/ 01:00:00 · first of 2 to end/);
+  assert.match(frame, /50 tok\/s reserved by seats/);
+  assert.match(frame, /Session Earn\. : \$1\.25 \(\$0\.25 per-token\) \/ \$3\.00 Guaranteed/);
+  assert.doesNotMatch(frame, /Prices/);
+  state.bookings = [1, 2, 3, 4].map((n) => ({ ...seat, id: `r_${n}`, tokS: 25 * n }));
+  frame = renderFrame(state, { width: 80, color: false });
+  assert.match(frame, /CURRENT JOB\s+: 4 rentals, 250 tok\/s reserved/);
+  state.publicMode = true;
+  state.priceOutUsd = 0.25;
+  state.priceHourUsd = 0.5;
+  frame = renderFrame(state, { width: 80, color: false });
+  assert.match(frame, /CURRENT JOB\s+: Per-token \+ 4 rentals/);
+  assert.match(frame, /Prices\s+: \$0\.25 per 1M tokens · \$0\.50\/h full GPU/);
+  state.priceHourUsd = 0;
+  assert.match(renderFrame(state, { width: 80, color: false }), /Prices\s+: \$0\.25 per 1M tokens · no hourly rentals/);
+});
+test('broken numbers never print as NaN or crash the dashboard', () => {
+  const state = initialState('http://127.0.0.1:8787');
+  const broken = { kind: 'request' as const, id: 'r_bad', model: 'm.gguf', verified: true, timerStartedAt: NaN, timerEndsAt: NaN, hours: NaN, minTokS: NaN, guaranteedNanos: NaN, shared: true, tokS: NaN };
+  state.status = 'working';
+  state.job = broken;
+  state.sessionEarnedNanos = NaN;
+  state.sessionGuaranteedNanos = NaN;
+  state.tokenEarnedNanos = NaN;
+  const rentals = [
+    [broken, { ...broken, id: 'r_text', tokS: '50' as unknown as number }, { ...broken, id: 'r_inf', tokS: Infinity, shared: false }],
+    [1, 2, 3, 4].map((n) => ({ ...broken, id: `r_${n}`, tokS: n === 1 ? NaN : Infinity })),
+    [],
+  ];
+  for (const bookings of rentals) {
+    state.bookings = bookings;
+    for (const publicMode of [false, true]) {
+      state.publicMode = publicMode;
+      const frame = renderFrame(state, { width: 90, color: false });
+      assert.doesNotMatch(frame, /NaN|Infinity/, frame);
+    }
+  }
+  state.bookings = [];
+  state.job = { ...broken, minTokS: '25' as unknown as number };
+  assert.doesNotMatch(renderFrame(state, { width: 90, color: false }), /NaN/);
+});
+test('one full-GPU rental keeps the dedicated request label', () => {
+  const state = initialState('http://127.0.0.1:8787');
+  const job = { kind: 'request' as const, id: 'req_804', model: 'm.gguf', verified: true, timerStartedAt: Date.now(), timerEndsAt: Date.now() + 60_000, hours: 1, minTokS: 25, guaranteedNanos: 1e9 };
+  state.job = job;
+  state.bookings = [job];
+  state.sessionGuaranteedNanos = 1e9;
+  const frame = renderFrame(state, { width: 72, color: false });
+  assert.match(frame, /CURRENT JOB\s+: Dedicated Buyer Request \(#804\)/);
+  assert.match(frame, /min required: 25\.0 tok\/s/);
+  assert.match(frame, /\/ \$1\.00 Guaranteed/);
+});

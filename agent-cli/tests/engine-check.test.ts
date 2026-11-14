@@ -112,3 +112,56 @@ test('an engine whose answers change is reported, and the host still comes onlin
     await server.close();
   }
 });
+test('llama-server restarts for a new slot count only while idle, and a running file is reused without a VRAM check', async () => {
+  const logs: Log[] = [];
+  const stream = { isTTY: false, write: (line: string) => { logs.push(JSON.parse(line) as Log); return true; } } as unknown as NodeJS.WriteStream;
+  const agent = new Agent({
+    config: { server: 'http://127.0.0.1:1', token: 'sh_test', wsPath: '/tunnel', updatedAt: 0 },
+    logger: new Logger({ level: 'info', json: true, color: false, stream }),
+    simulation: false,
+    publicMode: false,
+    context: 2048,
+    json: true,
+    gpuOverride: { name: 'Fake GPU', vramMb: 24_576 },
+    engine: { binaryPath: process.execPath, baseArgs: [FIXTURE] },
+  });
+  const internals = agent as unknown as {
+    loadModel(input: string, opts: { context: number; requestId: string | null }): Promise<unknown>;
+    ensureRunner(model: unknown, context: number, slots?: number, owner?: string | null): Promise<void>;
+    runner: object | null;
+    runnerSlotCount: number | null;
+    bookingSlots: number;
+    activeJobs: Map<string, unknown>;
+    gpu: { primary: { freeVramMb: number } | null };
+  };
+  try {
+    const model = await internals.loadModel(MODEL, { context: 2048, requestId: null });
+    const first = internals.runner;
+    assert.ok(first);
+    assert.equal(internals.runnerSlotCount, 1);
+    // A job is running: a new slot count keeps the current engine and only warns.
+    internals.activeJobs.set('busy', { controller: new AbortController() });
+    await internals.ensureRunner(model, 2048, 2);
+    assert.equal(internals.runner, first);
+    assert.equal(internals.runnerSlotCount, 1);
+    assert.ok(logs.some((log) => log.level === 'warn' && /Keeping llama-server at 1 parallel slots \(2 asked for\)/.test(log.message)));
+    internals.activeJobs.delete('busy');
+    // Idle: restart with the new slot count.
+    await internals.ensureRunner(model, 2048, 2);
+    const second = internals.runner;
+    assert.notEqual(second, first);
+    assert.equal(internals.runnerSlotCount, 2);
+    // The running model's memory shows as used VRAM. Loading the same file with the same
+    // settings reuses the engine without a fit check that would count the model twice.
+    internals.gpu.primary!.freeVramMb = 1;
+    internals.bookingSlots = 2;
+    await internals.loadModel(MODEL, { context: 2048, requestId: 'r_same' });
+    assert.equal(internals.runner, second);
+    // A restart (here for a third slot) still checks free VRAM, and leaves the engine running when it fails.
+    internals.bookingSlots = 3;
+    await assert.rejects(internals.loadModel(MODEL, { context: 2048, requestId: 'r_more' }), /Needs about/);
+    assert.equal(internals.runner, second);
+  } finally {
+    await agent.stop();
+  }
+});

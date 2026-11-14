@@ -75,17 +75,38 @@ npx sublera-cli start r_abc123
 ```
 
 The agent downloads and verifies the model, passes the model check, serves the
-booking, and exits when the booking ends. If you do not start within 15 minutes,
+booking, and exits when the booking ends. If other bookings still use the GPU at
+that point, it keeps serving them and exits after the last one. If you do not start within 15 minutes,
 the request goes back to the board. With `sublera start` already running, a Take
 on the website starts the download at once.
 
-For public pay-per-token hosting from the terminal:
+For public hosting from the terminal:
 
 ```bash
 npx sublera-cli host \
   https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
-  --price 0.25 --ctx 8192 --slots 4
+  --price 0.25 --price-hour 0.5 --ctx 8192 --slots 4
 ```
+
+A public host earns three ways, all on the one loaded model. Per-token buyers and
+speed seats share the GPU; a full-GPU rental has it alone:
+
+- **Per 1M tokens.** Buyers pay per answer at `--price` (or `--price-in` /
+  `--price-out`).
+- **Per hour, full GPU.** One renter gets the whole GPU for a number of hours at
+  `--price-hour` (default `0.50` USD; `0` turns hourly rentals off; at most `50`).
+  While it runs there are no seats and no per-token selling.
+- **Per hour, speed seat.** A renter reserves part of the measured speed, for
+  example 50 of 300 tok/s, for a number of hours. The rest keeps serving other
+  seats and per-token buyers. The server sets seat prices from `--price-hour`.
+
+The server benchmarks the loaded model, admits only the seats and jobs that fit,
+and paces each seat to its reserved speed. The agent serves every booking side by
+side and never restarts `llama-server` while a booking or public buyers use it.
+The dashboard lists each rental, the one that ends first, and earnings: per-token
+earnings plus the time share of every booking. Per-token earnings made while
+rentals run are not counted there, because the agent cannot tell a seat
+renter's jobs from per-token jobs; the wallet on the website is exact.
 
 For an SSH/mini-datacenter host that wants to see the buyer request board:
 
@@ -95,7 +116,7 @@ npx sublera-cli jobs
 
 `jobs` claims the selected request and, if no agent is already running, starts
 the tunnel/model/download/serve loop in the same terminal until the booking
-ends or you press Ctrl+C.
+ends and no other booking uses the GPU, or you press Ctrl+C.
 
 ## Commands
 
@@ -103,16 +124,16 @@ ends or you press Ctrl+C.
 | --- | --- |
 | `sublera login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
 | `sublera doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
-| `sublera start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request and exit when it ends. |
-| `sublera host <url\|path>` | Public pay-per-token mode with a chosen GGUF and price per 1M tokens. |
+| `sublera start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request; exit after it ends, once no other booking is active. |
+| `sublera host <url\|path>` | Public mode with a chosen GGUF: a price per 1M tokens, plus hourly rentals of the full GPU or a speed seat (`--price-hour`). |
 | `sublera jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
-| `sublera status` | Read-only host, reliability, wallet and active-booking summary. |
+| `sublera status` | Read-only host, reliability, wallet and a line for every active booking. |
 | `sublera config [show\|path]` | The settings in use and where each one came from (flag, env, `agent.json`, login, default). Keys are masked. |
 | `sublera logout` | Remove the saved host key. |
 
 Global flags: `--server`, `--key`, `--ws-path`, `--simulation`, `--gpu`,
 `--vram`, `--ctx`, `--slots`, `--price`, `--price-in`, `--price-out`,
-`--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--log-level`,
+`--price-hour`, `--tok-s`, `--no-install`, `--no-browser`, `--json`, `--verbose`, `--log-level`,
 `--log-file`, `--no-color`, `--once`. Each can also be set with a `SUBLERA_*`
 environment variable or in `~/.sublet/agent.json` (see [Configuration](#configuration)).
 `--gpu` and `--vram` also correct a wrongly detected GPU name or VRAM size on a real host.
@@ -192,7 +213,7 @@ Everything lives under `~/.sublet` (override with `SUBLERA_HOME`):
 ```text
 ~/.sublet/config.json        host key + server, written by sublera login (0600)
 ~/.sublet/agent.json         optional settings file you write (see Configuration)
-~/.sublet/state.json         active booking recovery snapshot (0600)
+~/.sublet/state.json         recovery snapshot of every active booking (0600)
 ~/.sublet/bin/               llama-server builds + manifest.json
 ~/.sublet/models/            verified .gguf files + .sublet.json sidecars
 ~/.sublet/cache/             GitHub release metadata, temporary archives
@@ -297,6 +318,7 @@ When both environment names are set, `SUBLERA_*` wins. This also applies to
   "context": 8192,
   "slots": 4,
   "price": 0.25,
+  "priceHour": 0.5,
   "noBrowser": true,
   "logLevel": "info"
 }
@@ -310,6 +332,7 @@ When both environment names are set, `SUBLERA_*` wins. This also applies to
 | `context` | `SUBLERA_CTX` | `--ctx` |
 | `slots` | `SUBLERA_SLOTS` | `--slots` |
 | `price` / `priceIn` / `priceOut` | `SUBLERA_PRICE` / `SUBLERA_PRICE_IN` / `SUBLERA_PRICE_OUT` | `--price` / `--price-in` / `--price-out` |
+| `priceHour` | `SUBLERA_PRICE_HOUR` | `--price-hour` |
 | `gpu` / `vram` | `SUBLERA_GPU` / `SUBLERA_VRAM` | `--gpu` / `--vram` |
 | `tokPerSec` | `SUBLERA_TOK_S` | `--tok-s` |
 | `noInstall` | `SUBLERA_NO_INSTALL` | `--no-install` |
@@ -469,14 +492,14 @@ server that implements the same small contract:
 | Endpoint / frame | Purpose |
 | --- | --- |
 | `GET /api/health` | doctor reachability check |
-| `GET /api/agent/me` | host key verification, wallet, host, active request |
+| `GET /api/agent/me` | host key verification, wallet, host, `activeRequest` (the newest) and `activeRequests` (every live request, newest first; the CLI falls back to `activeRequest` when it is missing) |
 | `POST /api/cli/login`, `POST /api/cli/login/poll` | device login: a user code for the website, then the host key once it is approved |
 | `GET /api/agent/requests` | open buyer requests + VRAM fit + `cached` (the model is already on this host's disk) |
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
-| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublera start <code>`) and `cachedModels` (SHA-256 of each verified GGUF on disk); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
+| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublera start <code>`), `cachedModels` (SHA-256 of each verified GGUF on disk) and `priceHourUsd` (the full-GPU hourly price; `0` from `start` and `jobs`, and when hourly rentals are off); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
 | HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublera-cli@latest` |
-| `welcome`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent. Model checks arrive as normal `infer` jobs. |
+| `welcome`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent. Model checks arrive as normal `infer` jobs. Several `booking` frames for different requests can be active at once; `shared` and `tokS` mark a speed seat (no `tokS` means the full GPU). A booking on the model that is already loaded needs no `load` frame. `reject` ends only its own request. |
 
 The agent sends its version as `user-agent: sublera-cli/<version>` on every
 request and as `agentVersion` in `hello`, so the server can refuse old agents

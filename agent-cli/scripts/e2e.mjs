@@ -130,9 +130,9 @@ async function startJobs(token, requestId) {
   ]);
 }
 
-function spawnCli(args) {
+function spawnCli(args, home = HOME) {
   const child = spawn(process.execPath, [CLI, ...args], {
-    env: { ...process.env, SUBLET_HOME: HOME },
+    env: { ...process.env, SUBLET_HOME: home },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -346,6 +346,48 @@ try {
   } finally {
     if (coded.child.exitCode == null) await stopAgent(coded);
     if (rivalStart.child.exitCode == null) await stopAgent(rivalStart);
+  }
+
+  // Rent by the hour: a public host (`sublera host`) rents out the model it runs, with no load. While the full GPU
+  // is rented it sells no answers per token; after the rental ends it does again, and the model never stopped.
+  const pub = await signup(`pub${String(Date.now()).slice(-8)}`);
+  const pubToken = (await api('/api/host/token', { method: 'POST', body: '{}' }, pub.cookie)).body.token;
+  const pubHome = await mkdtemp(join(tmpdir(), 'sublet-e2e-pub-'));
+  const hosting = spawnCli([
+    'host', 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    '--simulation', '--no-color', '--tok-s', '40', '--price-hour', '1',
+    '--gpu', 'NVIDIA GeForce RTX 4090', '--vram', '24564', '--server', SERVER, '--key', pubToken,
+  ], pubHome);
+  try {
+    const offer = await waitFor(async () => {
+      const models = (await api('/api/app/models', {}, ava.cookie)).body.models || [];
+      return models.find((m) => m.id === 'tinyllama-1.1b' && m.hourly?.fullNanos === 1_000_000_000) ?? null;
+    }, 20_000, `the public host to rent by the hour (${hosting.output().slice(-400)})`);
+    const rent = await api('/api/app/rent', { method: 'POST', body: JSON.stringify({ model: offer.id, hours: 0.25 }) }, ava.cookie);
+    assert(rent.ok && rent.body.request?.tokS === null, `hourly rental failed: ${rent.status} ${rent.text}`);
+    const rental = rent.body.request;
+    await waitFor(async () => {
+      const result = await api('/api/agent/me', { headers: { authorization: `Bearer ${pubToken}` } });
+      const live = result.body.activeRequests ?? [result.body.activeRequest].filter(Boolean);
+      return live.find((r) => r.id === rental.id && r.timerStartedAt) ?? null;
+    }, 25_000, 'the hourly rental to pass its model check');
+    const rentedChat = await sseChat(`/r/${rental.id}/v1/chat/completions`, 16);
+    assert(rentedChat.final?.sublet?.charged === false, 'the rented chat was charged');
+    const busy = await api(`/h/${pub.user.username}/v1/chat/completions`, {
+      method: 'POST', headers: { authorization: `Bearer ${buyerKey}` }, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert(busy.status === 409, `a full-GPU rental still sold answers per token: ${busy.status}`);
+    const ended = await api(`/api/board/${rental.id}/cancel`, { method: 'POST', body: '{}' }, ava.cookie);
+    assert(ended.ok, `cancel failed: ${ended.status} ${ended.text}`);
+    const after = await waitFor(async () => {
+      const chat = await sseChat(`/h/${pub.user.username}/v1/chat/completions`, 16).catch(() => null);
+      return chat?.final?.sublet?.charged ? chat : null;
+    }, 20_000, 'pay-per-token to resume after the rental');
+    assert(hosting.child.exitCode == null, `the public host stopped: ${hosting.output().slice(-400)}`);
+    log('rent by the hour', `rented the full GPU of a public host without a load, then it sold ${after.final.usage.completion_tokens} tokens per answer again`);
+  } finally {
+    if (hosting.child.exitCode == null) await stopAgent(hosting);
+    await rm(pubHome, { recursive: true, force: true }).catch(() => undefined);
   }
 
   console.log(`\n${results.length} end-to-end checks passed against ${SERVER}.`);

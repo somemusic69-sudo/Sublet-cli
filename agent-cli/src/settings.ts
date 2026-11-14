@@ -19,6 +19,7 @@ export type Settings = {
   price?: number;
   priceIn?: number;
   priceOut?: number;
+  priceHour?: number;
   gpu?: string;
   vram?: number;
   tokPerSec?: number;
@@ -46,6 +47,7 @@ export const SETTINGS_SPEC: ReadonlyArray<{ key: keyof Settings; env: string; ki
   { key: 'price', env: 'SUBLET_PRICE', kind: 'number', help: 'Public price per 1M output tokens (USD)' },
   { key: 'priceIn', env: 'SUBLET_PRICE_IN', kind: 'number', help: 'Public price per 1M input tokens (USD)' },
   { key: 'priceOut', env: 'SUBLET_PRICE_OUT', kind: 'number', help: 'Public price per 1M output tokens (USD)' },
+  { key: 'priceHour', env: 'SUBLET_PRICE_HOUR', kind: 'number', help: 'Host mode price per hour for the full GPU (USD, 0-50; 0 = no hourly rentals)' },
   { key: 'gpu', env: 'SUBLET_GPU', kind: 'string', help: 'Correct a wrongly detected GPU name' },
   { key: 'vram', env: 'SUBLET_VRAM', kind: 'integer', help: 'Correct a wrongly detected VRAM size (MB)' },
   { key: 'tokPerSec', env: 'SUBLET_TOK_S', kind: 'number', help: 'Advertised tokens/sec (the server measures its own)' },
@@ -179,5 +181,6 @@ export function resolveSettings(fromFlags: Settings, env: NodeJS.ProcessEnv = pr
   if (typeof values.context === 'number' && values.context < 256) throw new Error('context must be at least 256 tokens');
   if (typeof values.slots === 'number' && (values.slots < 1 || values.slots > 16)) throw new Error('slots must be between 1 and 16');
   if (typeof values.drainTimeoutMs === 'number' && values.drainTimeoutMs > 300_000) throw new Error('drainTimeoutMs must be between 0 and 300000');
+  if (typeof values.priceHour === 'number' && values.priceHour > 50) throw new Error('priceHour must be between 0 and 50 USD');
   return { values: values as Settings, sources, file };
 }

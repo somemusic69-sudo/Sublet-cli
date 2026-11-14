@@ -17,7 +17,7 @@ import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } fr
 import { execFile, sleep, toError } from './util/exec.js';
 import { canOpenBrowser, openUrl, printable } from './util/open.js';
 import { formatBytes, formatBytesPerSec, formatDuration, formatPercent, formatSpeed, formatUsdNanos, padRight, truncate } from './util/format.js';
-import type { AgentMe, AgentRequest } from './types.js';
+import { activeRequestsOf, isRequestId, type AgentMe, type AgentRequest } from './types.js';
 import { EXIT, UsageError } from './exitCodes.js';
 import { SETTINGS_SPEC, type ResolvedSettings } from './settings.js';
 import { proxyFor, proxySettings, redactProxy } from './network/proxy.js';
@@ -45,6 +45,7 @@ export type GlobalFlags = {
   price?: number;
   priceIn?: number;
   priceOut?: number;
+  priceHour?: number;
   gpu?: string;
   vram?: number;
   tokPerSec?: number;
@@ -343,9 +344,9 @@ async function listModels(): Promise<{ count: number; bytes: number }> {
 
 export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<number> {
   const requestId = flags.positionals[0] ?? null;
-  if (requestId && !/^[A-Za-z0-9_-]{3,80}$/.test(requestId)) throw new UsageError(`"${requestId}" is not a request code. Copy the start command from the website.`);
+  if (requestId && !isRequestId(requestId)) throw new UsageError(`"${requestId}" is not a request code. Copy the start command from the website.`);
   const cfg = await readyConfig(flags, logger);
-  if (requestId) logger.info(`Serving request ${requestId}. The agent stops when the booking ends.`);
+  if (requestId) logger.info(`Serving request ${requestId}. The agent stops when the booking ends and no other rental uses this GPU.`);
   const agent = new Agent({
     requestId,
     config: cfg,
@@ -406,6 +407,7 @@ export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<numbe
     price: flags.price ?? 0.25,
     priceInUsd: flags.priceIn ?? null,
     priceOutUsd: flags.priceOut ?? flags.price ?? 0.25,
+    priceHourUsd: flags.priceHour ?? 0.5,
     context: flags.context,
     slots: flags.slots,
     gpuOverride: gpuOverrideFrom(flags),
@@ -441,21 +443,35 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
   agent.once('fatal', () => { void stop(1, true); });
   let watcher: NodeJS.Timeout | null = null;
   if (target) {
+    // The target ending is not enough to exit: other bookings on the same GPU keep the agent running.
+    let targetDone = false;
+    let rejectedTarget = false;
+    let waitingNoted = false;
+    const exitWhenIdle = () => {
+      if (!targetDone || stopping) return;
+      if (agent.servingOthers(target)) {
+        if (!waitingNoted) logger.info(`Request ${target} is over; other rentals are still active on this GPU, so the agent stays online until they end.`);
+        waitingNoted = true;
+        return;
+      }
+      if (waitingNoted) logger.info('No other rentals are left; stopping.');
+      else if (served && !rejectedTarget) logger.success(`Booking ${target} finished. Run sublera start to stay online for public calls.`);
+      void stop(served ? 0 : 1);
+    };
     agent.on('rejected', (event: RejectedEvent) => {
       if (event.requestId !== target) return;
       served ||= event.wasActive;
       if (served) logger.info(`Request ${target} ended: ${event.reason}`);
       else logger.error(`Cannot serve ${target}: ${event.reason}`);
-      void stop(served ? 0 : 1);
+      targetDone = true;
+      rejectedTarget = true;
+      exitWhenIdle();
     });
     watcher = setInterval(() => {
-      const job = agent.dashboardState.job;
-      const mine = job?.kind === 'request' && job.id === target;
-      if (mine && job.timerEndsAt) served = true;
-      if (served && (!mine || Date.now() > (job?.timerEndsAt ?? 0) + 3_000)) {
-        logger.success(`Booking ${target} finished. Run sublera start to stay online for public calls.`);
-        void stop(0);
-      }
+      const booking = agent.booking(target);
+      if (booking?.timerEndsAt) served = true;
+      if (served && (!booking || Date.now() > (booking.timerEndsAt ?? 0) + 3_000)) targetDone = true;
+      exitWhenIdle();
     }, 1_000);
   }
   try {
@@ -578,17 +594,26 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
     logger.success(`Claimed ${requestId}. This terminal is now the serving agent.`, { stop: 'Ctrl+C' });
 
     let sawJob = false;
+    let targetDone = false;
+    let waitingNoted = false;
     let lastNotice = Date.now();
-    while (!finished && !rejected) {
-      const job = agent.dashboardState.job;
-      if (job?.kind === 'request' && job.timerEndsAt) {
+    while (!finished) {
+      const booking = agent.booking(requestId);
+      if (booking?.timerEndsAt) {
         sawJob = true;
-        if (Date.now() > job.timerEndsAt + 3_000) break;
-      } else if (sawJob && !job) {
-        break;
-      } else if (!sawJob && Date.now() - lastNotice > 15 * 60_000) {
+        if (Date.now() > booking.timerEndsAt + 3_000) targetDone = true;
+      } else if (sawJob && !booking) {
+        targetDone = true;
+      } else if (!sawJob && !rejected && Date.now() - lastNotice > 15 * 60_000) {
         logger.info('Still waiting for the buyer to confirm or for the timer to start. Press Ctrl+C to stop.');
         lastNotice = Date.now();
+      }
+      if (rejected) targetDone = true;
+      // Exit only when this request is over and no other booking still uses this GPU.
+      if (targetDone) {
+        if (!agent.servingOthers(requestId)) break;
+        if (!waitingNoted) logger.info(`Request ${requestId} is over; other rentals are still active, so this terminal keeps serving them.`);
+        waitingNoted = true;
       }
       await sleep(1_000);
     }
@@ -671,21 +696,33 @@ export async function cmdStatus(flags: GlobalFlags, logger: Logger): Promise<num
     return 0;
   }
   const host = me.host;
+  // Text from the server is printed without control characters.
+  const text = (value: unknown) => printable(String(value ?? ''));
   output.write(`\n${BRAND} host status\n`);
-  output.write(`user        @${me.user.username}\n`);
+  output.write(`user        @${text(me.user.username)}\n`);
   output.write(`server      ${cfg.server}\n`);
-  output.write(`host        ${host ? `${host.status} · ${host.kind} · ${host.gpuName}` : 'not registered yet'}\n`);
+  output.write(`host        ${host ? `${text(host.status)} · ${text(host.kind)} · ${text(host.gpuName)}` : 'not registered yet'}\n`);
   // Only the server decides a hold (two strikes, or low reliability after repeated failures); never guess from the score.
-  output.write(`reliability ${host ? formatPercent(host.uptimePct) : '-'}${host?.status === 'held' ? `  HELD${host.flagReason ? ` (${host.flagReason})` : ''}` : ''}\n`);
-  output.write(`model       ${host?.modelLabel || '-'} ${host?.quant || ''}\n`);
+  output.write(`reliability ${host ? formatPercent(host.uptimePct) : '-'}${host?.status === 'held' ? `  HELD${host.flagReason ? ` (${text(host.flagReason)})` : ''}` : ''}\n`);
+  output.write(`model       ${text(host?.modelLabel) || '-'} ${text(host?.quant)}\n`);
   output.write(`speed       ${formatSpeed(host?.tokPerSec)}\n`);
   output.write(`wallet      ${formatUsdNanos(me.wallet.availableNanos)} available · ${formatUsdNanos(me.wallet.pendingNanos)} pending\n`);
-  if (me.activeRequest) {
-    const active = me.activeRequest;
-    const remaining = active.timerEndsAt ? Math.max(0, Math.round((active.timerEndsAt - Date.now()) / 1000)) : null;
-    output.write(`booking     ${active.id} · ${active.status}${remaining != null ? ` · ${formatDuration(remaining)} left` : ''}\n`);
-  }
+  output.write(statusBookingLines(me));
   return 0;
+}
+
+/** One `booking` line per live request: id, status, reserved speed, time left. */
+export function statusBookingLines(me: Pick<AgentMe, 'activeRequest' | 'activeRequests'>, now = Date.now()): string {
+  const rows = activeRequestsOf(me);
+  let text = rows.length > 1 ? `bookings    ${rows.length} active\n` : '';
+  // activeRequestsOf drops rows with a malformed id; the status text from the server is printed without control characters.
+  for (const active of rows) {
+    const remaining = active.timerEndsAt ? Math.max(0, Math.round((active.timerEndsAt - now) / 1000)) : null;
+    const speed = active.tokS && active.tokS > 0 ? `${active.tokS} tok/s seat` : active.shared ? 'shared seat' : 'full GPU';
+    const known = active.tokS !== undefined || active.shared != null;
+    text += `booking     ${printable(active.id)} · ${printable(active.status)}${known ? ` · ${speed}` : ''}${remaining != null ? ` · ${formatDuration(remaining)} left` : ''}\n`;
+  }
+  return text;
 }
 
 /**
@@ -758,9 +795,9 @@ export function globalHelp(): string {
     '  login                 Link this computer to your Sublera account (opens the website)',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
     '  start [code]          Connect and serve (connects this computer on the first run); with a code, serve that request',
-    '  host <gguf>           Serve a public pay-per-token model',
+    '  host <gguf>           Serve a public model: per 1M tokens, plus hourly rentals of the GPU',
     '  jobs                  Browse and claim buyer requests from the terminal',
-    '  status                Show this host, wallet, and active booking',
+    '  status                Show this host, wallet, and every active booking',
     '  health [live|ready]    Local fresh process/serving readiness (JSON; no server attestation)',
     '  storage [status|prune] Inspect storage; prune previews old partials (--force applies)',
     '  config [show|path]    Show the settings in use and where each came from',
@@ -777,6 +814,8 @@ export function globalHelp(): string {
     '  --price <usd>         Public price per 1M output tokens',
     '  --price-in <usd>      Public price per 1M input tokens',
     '  --price-out <usd>     Public price per 1M output tokens',
+    '  --price-hour <usd>    host: price per hour for the full GPU (default 0.50,',
+    '                        0 = no hourly rentals, max 50); seats cost a share of it',
     '  --gpu <name>          Correct a wrongly detected GPU name',
     '  --vram <mb>           Correct detected VRAM in MB',
     '  --tok-s <n>           Advertised tokens/sec',
@@ -802,7 +841,7 @@ export function globalHelp(): string {
     '  sublera start',
     '  sublera start r_abc123             (the command from Take on the website)',
     '  sublera start --simulation --gpu "RTX 4060" --vram 8188',
-    '  sublera host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25',
+    '  sublera host https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf --price 0.25 --price-hour 0.5',
     '  sublera jobs',
     '',
     'Supported hosting settings can also come from SUBLERA_* variables or',
