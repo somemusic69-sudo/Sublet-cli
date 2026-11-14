@@ -40,7 +40,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       # The same tests as `npm test`; failures also become annotations on the run page.
-      - run: node --import tsx --test --test-timeout=120000 --test-force-exit --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/gh-reporter.mjs --test-reporter-destination=stdout "tests/*.test.ts"
+      - run: node --import tsx --test --test-timeout=120000 --test-force-exit --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/gh-reporter.mjs --test-reporter-destination=stdout tests/*.test.ts
       - run: npm run build
       - run: node scripts/check-package.mjs
       - run: npm audit --omit=dev

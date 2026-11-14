@@ -324,7 +324,21 @@ test('fetch() goes through HTTP_PROXY after installFetchProxy, and loopback stay
   }
 });
 
-test('native fetch shares NO_PROXY matching with ws, including wildcard lists and alternate loopback', { timeout: 20_000 }, async () => {
+/** Whether this machine answers on 127.0.0.2. Linux and Windows do; macOS has only 127.0.0.1 unless an alias is added. */
+async function canBind(host: string): Promise<boolean> {
+  const server = createNetServer();
+  try {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, host, () => resolve()); });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+const ALT_LOOPBACK = await canBind('127.0.0.2');
+
+test('native fetch shares NO_PROXY matching with ws, including wildcard lists and alternate loopback', { timeout: 20_000, skip: ALT_LOOPBACK ? false : 'this machine has no 127.0.0.2 loopback address' }, async () => {
   const proxy = await connectProxy();
   const direct = await listen(createServer((_req, res) => res.end('ok')));
   const loopback = await listen(createServer((_req, res) => res.end('loopback')), '127.0.0.2');
