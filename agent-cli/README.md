@@ -213,9 +213,12 @@ and the download restarts from zero rather than corrupting weights.
 
 `start`, `host`, and a serving `jobs` agent exclusively own `SUBLERA_HOME` via
 `agent.lock`. A second process refuses to start. Storage maintenance acquires
-the same lock, as does engine installation by `doctor --fix`. After an abrupt crash the lock is deliberately not reclaimed
-automatically: stop/check every agent using that directory, then remove only
-`agent.lock`. Never remove `state.json` just to unlock the directory.
+the same lock, as does engine installation by `doctor --fix`. After an abrupt crash
+the next agent takes the lock over only when the process that wrote it is no
+longer running, so a service manager can restart the agent and it restores its
+booking. A lock held by a running process, or one that cannot be read, is
+refused: check every agent using that directory, then remove only `agent.lock`.
+Never remove `state.json` just to unlock the directory.
 
 - `sublera health live --json`: local process liveness.
 - `sublera health ready --json`: local readiness (default health mode). Requires

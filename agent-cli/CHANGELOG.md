@@ -42,8 +42,10 @@ the files under `~/.sublet`. A change to any of these needs a major version.
   aliases. Legacy executables and `SUBLET_*` environment names remain supported;
   `SUBLERA_*` names take precedence. The default `.sublet` data directory and
   repository identity are unchanged.
-- Exclusive `SUBLET_HOME` ownership for serving agents and storage maintenance;
-  stale locks fail closed with explicit operator recovery instructions.
+- Exclusive `SUBLET_HOME` ownership for serving agents and storage maintenance.
+  A lock left by a process that is no longer running is taken over, so an agent
+  restarted after a crash restores its booking; a live or unreadable owner's lock
+  is refused with recovery instructions.
 - Local `health [live|ready]` snapshots, bounded SIGTERM inference drain, and
   `storage status|prune` with dry-run-by-default pruning of old partial files.
 - Operational regression tests for cross-process ownership, cancellation,

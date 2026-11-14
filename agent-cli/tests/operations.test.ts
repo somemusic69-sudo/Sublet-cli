@@ -15,7 +15,7 @@ async function home(t: { after: (fn: () => Promise<void>) => void }) {
   return { SUBLET_HOME: dir };
 }
 
-test('instance ownership is exclusive, release is idempotent, and stale locks fail closed', async (t) => {
+test('instance ownership is exclusive, release is idempotent, and only a dead owner\'s lock is taken over', async (t) => {
   const env = await home(t);
   const release = await acquireInstanceLock(env);
   await assert.rejects(acquireInstanceLock(env), /locked/);
@@ -23,8 +23,22 @@ test('instance ownership is exclusive, release is idempotent, and stale locks fa
   await release();
   const next = await acquireInstanceLock(env);
   await next();
-  await writeFile(instanceLockPath(env), JSON.stringify({ pid: 2147483647, id: 'stale' }));
-  await assert.rejects(acquireInstanceLock(env), /After a crash/);
+  const lock = instanceLockPath(env);
+  // After a crash the process that wrote the lock is gone: a restarted agent takes the lock over.
+  await writeFile(lock, JSON.stringify({ pid: 2147483647, id: 'stale' }));
+  const reclaimed = await acquireInstanceLock(env);
+  assert.notEqual(JSON.parse(await readFile(lock, 'utf8')).id, 'stale');
+  await reclaimed();
+  // A running owner keeps it, and so does a lock whose owner cannot be read.
+  await writeFile(lock, JSON.stringify({ pid: process.pid, id: 'running' }));
+  await assert.rejects(acquireInstanceLock(env), /is running/);
+  await writeFile(lock, 'not json');
+  await assert.rejects(acquireInstanceLock(env), /cannot be read/);
+  // While another process is taking over a stale lock, nobody else may.
+  await writeFile(lock, JSON.stringify({ pid: 2147483647, id: 'stale' }));
+  await writeFile(`${lock}.reclaim`, '');
+  await assert.rejects(acquireInstanceLock(env), /taking over/);
+  assert.equal(JSON.parse(await readFile(lock, 'utf8')).id, 'stale');
 });
 
 test('concurrent releases share one operation, including after a new owner acquires', async (t) => {
